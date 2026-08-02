@@ -10,6 +10,8 @@
 //!   GPU rental payout) can anchor an attestation.
 
 pub mod chain;
+#[cfg(feature = "kaspad")]
+pub mod kaspad;
 
 use secp256k1::schnorr::Signature;
 use secp256k1::{Keypair, Message, Secp256k1, XOnlyPublicKey};
@@ -340,11 +342,15 @@ pub fn derive_context_keypair(seed: &[u8; 32], context: &str) -> Keypair {
 
 /// Verifies that an attestation id is committed on-chain.
 ///
-/// M1 ships the trait + a stub; the real implementation queries a kaspad
-/// (wRPC) for `anchor.txid`, confirms acceptance, and checks that the tx
-/// payload contains the 32-byte id (testnet-10 first, then mainnet via
-/// rustynode). Every scoring path must treat unanchored attestations as
-/// nonexistent — anchoring IS the Sybil cost.
+/// The real implementation is [`kaspad::KaspadAnchorVerifier`] (feature
+/// `kaspad`): it queries a node for `anchor.txid`, requires the transaction to
+/// have been accepted by the virtual chain, and checks that its payload
+/// contains the 32-byte id. Every scoring path must treat unanchored
+/// attestations as nonexistent — anchoring IS the Sybil cost.
+///
+/// Implementations must distinguish "provably not anchored" (`Ok(false)`) from
+/// "could not determine" (`Err`). Reporting the second as the first would let a
+/// node outage read as a fraudulent chain.
 pub trait AnchorVerifier {
     fn is_anchored(&self, id: &[u8; 32], anchor: &Outpoint) -> std::io::Result<bool>;
 }

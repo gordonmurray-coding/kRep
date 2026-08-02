@@ -4,3 +4,4 @@ Cargo.lock
 *.chain.json
 partial.json
 att.json
+*.key
