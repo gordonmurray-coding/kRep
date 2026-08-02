@@ -141,10 +141,12 @@ fn load_chain(path: &PathBuf) -> Result<Chain> {
     Ok(serde_json::from_str(&s)?)
 }
 
-fn stdin_json<T: serde::de::DeserializeOwned>() -> Result<T> {
+/// Slurp stdin. Callers deserialize with a concrete type, so no `serde` trait
+/// bound (and no extra dependency) is needed here.
+fn stdin_str() -> Result<String> {
     let mut s = String::new();
     std::io::stdin().read_to_string(&mut s)?;
-    Ok(serde_json::from_str(&s)?)
+    Ok(s)
 }
 
 fn main() -> Result<()> {
@@ -200,12 +202,12 @@ fn main() -> Result<()> {
         }
         Cmd::Countersign { seed, context } => {
             let kp = load_keypair(&seed, &context)?;
-            let partial: PartialAttestation = stdin_json()?;
+            let partial: PartialAttestation = serde_json::from_str(&stdin_str()?)?;
             let att = countersign(&kp, partial)?;
             println!("{}", serde_json::to_string_pretty(&att)?);
         }
         Cmd::Append { chain } => {
-            let att: Attestation = stdin_json()?;
+            let att: Attestation = serde_json::from_str(&stdin_str()?)?;
             let mut c = if chain.exists() {
                 load_chain(&chain)?
             } else {
@@ -236,7 +238,7 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&c.score())?);
         }
         Cmd::Id => {
-            let att: Attestation = stdin_json()?;
+            let att: Attestation = serde_json::from_str(&stdin_str()?)?;
             println!("{}", hex::encode(att.id()));
         }
     }

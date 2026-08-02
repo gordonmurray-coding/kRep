@@ -106,6 +106,9 @@ impl<'de> Deserialize<'de> for Outpoint {
     }
 }
 
+/// Kept as the non-optional counterpart to [`hex32_opt`] for future fields
+/// (no current body field is a bare 32-byte hash).
+#[allow(dead_code)]
 mod hex32 {
     use serde::{Deserialize, Deserializer, Serializer};
     pub fn serialize<S: Serializer>(v: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
