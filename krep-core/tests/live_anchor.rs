@@ -7,11 +7,16 @@
 //!   cargo test -p krep-core --features kaspad --test live_anchor -- --nocapture
 //! ```
 //!
-//! The point of this test is to exercise the parts that cannot be faked in a
-//! unit test: that the virtual-chain scan actually finds a transaction the node
-//! really accepted, that descending into the accepting block's mergeset really
-//! retrieves that transaction's payload, and that the three verdicts
-//! (`Ok(true)` / `Ok(false)` / `Err`) come out where they should.
+//! This exercises what cannot be faked in a unit test: that the two-phase
+//! resolution really works against live chain data — locating an outpoint's
+//! creating transaction in the accepted-id stream, then finding the accepted
+//! transaction that *spends* it and reading its payload.
+//!
+//! The sample is not hardcoded. The test discovers a real settlement from the
+//! node itself: an accepted transaction carrying a payload, whose first input
+//! becomes the `anchor` outpoint. That is exactly the shape kRep produces —
+//! spend an escrow, commit the id in the payload — so the positive assertion is
+//! made against a genuine on-chain commitment rather than a fixture.
 
 #![cfg(feature = "kaspad")]
 
@@ -56,43 +61,61 @@ async fn connect(url: &str) -> Arc<dyn RpcApi> {
     }
 }
 
-/// A real accepted transaction discovered from the node itself.
+/// A real settlement discovered from the node: an accepted, payload-carrying
+/// transaction plus the outpoint it spends.
 struct Sample {
-    txid: kaspa_rpc_core::RpcHash,
+    settlement: kaspa_rpc_core::RpcHash,
+    /// The outpoint the settlement spends — an `anchor` in kRep terms.
+    anchor: Outpoint,
     payload: Vec<u8>,
-    outputs: usize,
 }
 
-/// Walk the virtual chain looking for accepted transactions, preferring one
-/// that carries a payload of at least 32 bytes (which lets us assert the
-/// positive path with a real on-chain commitment).
-async fn find_sample(rpc: &Arc<dyn RpcApi>, max_batches: usize) -> (Option<Sample>, Option<Sample>) {
+/// Cheaply walk the selected parent chain from the pruning point to the tip,
+/// recording the batch boundaries. Without acceptance data this is fast, and it
+/// gives us handles on *recent* chain positions — which matters, because a
+/// settlement sampled from the oldest end of history necessarily spends
+/// outputs created before the pruning point, i.e. outputs this node no longer
+/// has. Those are legitimately unverifiable and prove nothing either way.
+async fn chain_marks(rpc: &Arc<dyn RpcApi>) -> Vec<kaspa_rpc_core::RpcHash> {
     let dag = rpc.get_block_dag_info().await.expect("dag info");
     println!(
         "network={} sink={} pruning_point={} virtual_daa={}",
         dag.network, dag.sink, dag.pruning_point_hash, dag.virtual_daa_score
     );
-
     let mut start = dag.pruning_point_hash;
-    let mut any: Option<Sample> = None;
-    let mut with_payload: Option<Sample> = None;
-    let mut accepted_seen = 0usize;
+    let mut marks = vec![start];
+    loop {
+        let resp = rpc.get_virtual_chain_from_block(start, false, None).await.expect("virtual chain");
+        match resp.added_chain_block_hashes.last() {
+            Some(&last) if last != start => {
+                start = last;
+                marks.push(start);
+            }
+            _ => break,
+        }
+    }
+    println!("chain walked to tip in {} marks", marks.len());
+    marks
+}
 
-    for batch in 0..max_batches {
+/// Walk the virtual chain collecting accepted transactions that both carry a
+/// payload of at least 32 bytes and spend something.
+async fn find_settlements(
+    rpc: &Arc<dyn RpcApi>,
+    from: kaspa_rpc_core::RpcHash,
+    max_batches: usize,
+    want: usize,
+) -> Vec<Sample> {
+    let mut start = from;
+    let mut out: Vec<Sample> = Vec::new();
+
+    for _ in 0..max_batches {
         let resp = rpc.get_virtual_chain_from_block(start, true, None).await.expect("virtual chain");
-        println!(
-            "batch {batch}: {} chain blocks, {} acceptance entries",
-            resp.added_chain_block_hashes.len(),
-            resp.accepted_transaction_ids.len()
-        );
 
         for entry in &resp.accepted_transaction_ids {
             if entry.accepted_transaction_ids.is_empty() {
                 continue;
             }
-            accepted_seen += entry.accepted_transaction_ids.len();
-
-            // Pull the mergeset once and inspect every accepted tx in it.
             let head = rpc.get_block(entry.accepting_block_hash, false).await.expect("accepting block");
             let verbose = head.verbose_data.expect("verbose data");
             let mergeset: Vec<_> = verbose
@@ -109,39 +132,35 @@ async fn find_sample(rpc: &Arc<dyn RpcApi>, max_batches: usize) -> (Option<Sampl
                     if !entry.accepted_transaction_ids.contains(&vd.transaction_id) {
                         continue;
                     }
-                    let sample =
-                        Sample { txid: vd.transaction_id, payload: tx.payload.clone(), outputs: tx.outputs.len() };
-                    if sample.payload.len() >= 32 && with_payload.is_none() {
-                        println!(
-                            "found payload-bearing accepted tx {} ({} byte payload)",
-                            sample.txid,
-                            sample.payload.len()
-                        );
-                        with_payload = Some(sample);
-                    } else if any.is_none() {
-                        println!("found accepted tx {} ({} byte payload)", sample.txid, sample.payload.len());
-                        any = Some(sample);
+                    if tx.payload.len() < 32 || tx.inputs.is_empty() {
+                        continue;
+                    }
+                    let prev = &tx.inputs[0].previous_outpoint;
+                    out.push(Sample {
+                        settlement: vd.transaction_id,
+                        anchor: Outpoint { txid: prev.transaction_id.as_bytes(), index: prev.index },
+                        payload: tx.payload.clone(),
+                    });
+                    println!(
+                        "candidate settlement {} ({} byte payload) spends {}:{}",
+                        vd.transaction_id,
+                        tx.payload.len(),
+                        prev.transaction_id,
+                        prev.index
+                    );
+                    if out.len() >= want {
+                        return out;
                     }
                 }
-                if with_payload.is_some() && any.is_some() {
-                    break;
-                }
-            }
-            if with_payload.is_some() && any.is_some() {
-                break;
             }
         }
 
-        if with_payload.is_some() && any.is_some() {
-            break;
-        }
         match resp.added_chain_block_hashes.last() {
             Some(&last) if last != start => start = last,
             _ => break,
         }
     }
-    println!("saw {accepted_seen} accepted transaction ids while sampling");
-    (any, with_payload)
+    out
 }
 
 #[test]
@@ -154,68 +173,88 @@ fn verifier_against_live_node() {
     let rt = tokio::runtime::Builder::new_multi_thread().enable_all().worker_threads(2).build().unwrap();
     let rpc = rt.block_on(connect(&url));
 
-    let (any, with_payload) = rt.block_on(find_sample(&rpc, 32));
-    let sample = with_payload.as_ref().or(any.as_ref()).expect(
-        "no accepted transaction found on this node — cannot exercise the verifier against real data",
-    );
+    let marks = rt.block_on(chain_marks(&rpc));
+    assert!(marks.len() > 2, "node has almost no retained chain; cannot sample");
+    // Sample near the tip so the outpoints being spent are themselves still
+    // within retained history, and start the verifier a little further back so
+    // phase 1 has margin to find them.
+    let sample_from = marks[marks.len().saturating_sub(3)];
+    let verify_from = marks[marks.len().saturating_sub(8)];
+    println!("sampling from {sample_from}, verifying from {verify_from}");
 
-    // Verify with min_confirmations 0: the samples come from deep history, but
-    // we do not want the confirmation trim to interact with this assertion.
-    // Exercise the shipped defaults, only relaxing the confirmation depth: the
-    // samples come from deep history, but we do not want the tip trim to
-    // interact with these assertions.
+    let samples = rt.block_on(find_settlements(&rpc, sample_from, 32, 6));
+    assert!(!samples.is_empty(), "no payload-carrying accepted transaction found near the tip");
+
     let verifier = KaspadAnchorVerifier::new(
         rpc.clone(),
         rt.handle().clone(),
-        ScanConfig { min_confirmations: 0, ..Default::default() },
+        // min_confirmations 0 so the tip trim does not interact with the
+        // assertions; scan_from bounds the work to recent history.
+        ScanConfig { scan_from: Some(verify_from), min_confirmations: 0, ..Default::default() },
     );
 
-    let anchor = Outpoint { txid: sample.txid.as_bytes(), index: 0 };
+    // A candidate is usable only if its spent outpoint's creating transaction
+    // is still within this node's retained history — otherwise phase 1 is
+    // legitimately unresolvable and there is nothing to assert.
+    let mut proven = 0usize;
+    for s in &samples {
+        let mut committed = [0u8; 32];
+        committed.copy_from_slice(&s.payload[..32]);
 
-    // 1. A random id is provably NOT committed by this real transaction.
-    //    Reaching a verdict at all proves the scan found the tx and the
-    //    mergeset descent retrieved its body.
-    let absent = [0x5au8; 32];
-    assert_eq!(
-        verifier.is_anchored(&absent, &anchor).expect("resolvable"),
-        false,
-        "a random id must not be considered anchored by {}",
-        sample.txid
-    );
-    println!("negative verdict OK against real tx {}", sample.txid);
+        match verifier.is_anchored(&committed, &s.anchor) {
+            Ok(true) => {
+                println!(
+                    "POSITIVE: {} spends {}:{} and its payload commits the id — spend-based \
+                     verification confirmed against real chain data",
+                    s.settlement,
+                    hex::encode(s.anchor.txid),
+                    s.anchor.index
+                );
 
-    // 2. An output index the transaction does not have is a fabricated anchor.
-    let bogus_index = Outpoint { txid: sample.txid.as_bytes(), index: sample.outputs as u32 + 500 };
-    assert_eq!(verifier.is_anchored(&absent, &bogus_index).expect("resolvable"), false);
-    println!("bogus output index rejected (tx has {} outputs)", sample.outputs);
+                // The same anchor must NOT vouch for an id the settlement does
+                // not carry. This is a genuine negative: the settlement was
+                // found and read, and it simply does not commit this id.
+                let absent = [0x5au8; 32];
+                assert!(
+                    !verifier.is_anchored(&absent, &s.anchor).expect("resolvable"),
+                    "an unrelated id must not verify against this settlement"
+                );
+                println!("negative verdict OK against the same real settlement");
 
-    // 3. The positive path, using bytes that really are in a real payload.
-    match with_payload.as_ref() {
-        Some(s) => {
-            let mut id = [0u8; 32];
-            id.copy_from_slice(&s.payload[..32]);
-            let a = Outpoint { txid: s.txid.as_bytes(), index: 0 };
-            assert!(
-                verifier.is_anchored(&id, &a).expect("resolvable"),
-                "the first 32 payload bytes of {} must verify as committed",
-                s.txid
-            );
-            println!("positive verdict OK: real payload commitment verified against {}", s.txid);
+                // An output index the escrow transaction does not have is a
+                // fabricated anchor.
+                let bogus = Outpoint { txid: s.anchor.txid, index: 100_000 };
+                assert!(
+                    !verifier.is_anchored(&committed, &bogus).expect("resolvable"),
+                    "an anchor naming a nonexistent output must be rejected"
+                );
+                println!("fabricated output index rejected");
+
+                proven += 1;
+                break;
+            }
+            Ok(false) => println!(
+                "candidate {} did not verify (its first input is not what carries the \
+                 commitment); trying another",
+                s.settlement
+            ),
+            Err(e) => println!("candidate {} unresolvable ({e}); trying another", s.settlement),
         }
-        None => println!(
-            "note: no accepted transaction with a >=32 byte payload in the sampled range, \
-             so the positive path was exercised only by unit tests"
-        ),
     }
+    assert!(
+        proven > 0,
+        "none of the {} sampled settlements could be verified — the spend-based path did not \
+         confirm against live data",
+        samples.len()
+    );
 
-    // 4. An unknown txid must be an error, never a false "unanchored" verdict.
+    // An outpoint whose creating transaction does not exist must be an error,
+    // never a false "unanchored" verdict.
     let unknown = Outpoint { txid: [0xab; 32], index: 0 };
-    let err = verifier.is_anchored(&absent, &unknown).unwrap_err();
-    println!("unknown txid correctly reported as unresolvable: {err}");
+    let err = verifier.is_anchored(&[0u8; 32], &unknown).unwrap_err();
     let msg = err.to_string();
+    println!("unknown anchor correctly reported as unresolvable: {msg}");
     assert!(msg.contains("could not be resolved"), "unexpected error text: {msg}");
-    // Having scanned to the tip, the diagnostic must say so rather than blaming
-    // a budget it never hit.
     assert!(msg.contains("to the virtual tip"), "expected a tip-reached diagnostic, got: {msg}");
 }
 
@@ -250,7 +289,7 @@ fn full_scan_cost() {
                 Some(&last) if last != start => start = last,
                 _ => break,
             }
-            if batches % 200 == 0 {
+            if batches.is_multiple_of(200) {
                 println!("  {batches} batches, {chain_blocks} chain blocks, {:?}", began.elapsed());
             }
             if began.elapsed() > Duration::from_secs(300) {

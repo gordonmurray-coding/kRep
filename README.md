@@ -25,8 +25,11 @@ A=$(./krep pubkey --seed a.seed --context demo)
 ./krep keygen --out b.seed
 B=$(./krep pubkey --seed b.seed --context demo)
 
-# A records a successful trade with B
+# pick the outpoint the settlement will spend — that IS the anchor
+./krep wallet-utxos --wallet wallet.key --rpc grpc://node:16110
 ANCHOR=<txid>:<index>
+
+# A records a successful trade with B, naming that outpoint
 ./krep create --seed a.seed --context demo --chain a.chain.json \
   --anchor "$ANCHOR" --role provider --counterparty "$B" \
   --outcome success --bucket 2 > partial.json
@@ -41,8 +44,9 @@ ANCHOR=<txid>:<index>
 ./krep countersign --seed a.seed --context demo < mirror.partial.json > mirror.att.json
 ./krep append --chain b.chain.json < mirror.att.json
 
-# one settlement, one anchor tx, two ids (64-byte payload)
-./krep anchor --wallet wallet.key --rpc grpc://node:16110 \
+# one settlement, one anchor tx, two ids (64-byte payload).
+# --spend must be the same outpoint the attestations named.
+./krep anchor --wallet wallet.key --rpc grpc://node:16110 --spend "$ANCHOR" \
   --id $(./krep id < att.json) --id $(./krep id < mirror.att.json)   # add --submit to broadcast
 
 # verification requires a node; --offline is possible but proves nothing
@@ -59,7 +63,7 @@ ANCHOR=<txid>:<index>
 | Hash-linked chain verification + default scoring | done |
 | Per-context pseudonym derivation from one seed | done |
 | On-chain anchor verification (`KaspadAnchorVerifier`, wRPC or gRPC) | done |
-| `krep anchor` — payload-carrying tx, one or two ids | builds + signs; `--submit` to broadcast |
+| `krep anchor` — spends the anchor outpoint, commits one or two ids | builds + signs; `--submit` to broadcast |
 | Mirror attestations — both sides accrue rep from one settlement | done |
 
 `verify` and `score` require `--rpc` (or `$KREP_RPC`) and fail closed without
@@ -67,13 +71,45 @@ it. `--offline` skips anchoring entirely, prints a loud banner, and marks its
 output `"anchor_status": "UNVERIFIED_OFFLINE"` — it is a debugging aid, not a
 reputation check.
 
-### How anchor verification works
+## What `anchor` means
 
-kaspad has **no transaction index** — there is no `getTransaction(txid)` RPC.
-So `txid -> (accepted?, payload)` is resolved by scanning the selected parent
-chain forward with `get_virtual_chain_from_block` (which yields the acceptance
-predicate directly) and descending into the accepting block's mergeset only on
-a hit. One scan resolves a whole chain's anchors, not one per attestation.
+`anchor` is the outpoint the settlement transaction **spends** — SPEC 1.2's
+`escrow_outpoint`, "txid:index of settled escrow". It is *not* the id of the
+transaction carrying the commitment.
+
+That is forced, not stylistic. If `anchor` named the payload-carrying
+transaction itself, the protocol would be unbuildable:
+
+- the id is `H(body ‖ signatures)`, and `body` contains the anchor
+- that transaction's payload must contain the id
+- a transaction's payload changes its txid
+
+Committing the id would require knowing the txid before choosing the payload
+that determines it. Naming the *spent* outpoint breaks the cycle, because the
+escrow output exists before the settlement that consumes it:
+
+1. an escrow (or any funded output) `O` exists — `krep wallet-utxos`
+2. both parties co-sign an attestation whose `anchor` is `O` → id
+3. the settlement spends `O` and carries the id in its payload — `krep anchor --spend O`
+
+The byte layout is unchanged (still a 36-byte outpoint), so no domain tags were
+bumped.
+
+### How verification works
+
+kaspad has **no transaction index** — no `getTransaction(txid)`, and certainly
+no "what spent this outpoint". So verification runs the flow above backwards,
+in two bounded phases:
+
+1. **Locate the escrow.** Find `anchor.txid` in the accepted-id stream from
+   `get_virtual_chain_from_block`. This proves the outpoint's creating
+   transaction was accepted, confirms it really has an output at that index,
+   and gives phase 2 a start point — nothing can spend an output before it
+   exists. One scan resolves a whole chain's anchors, not one per attestation.
+2. **Find the spender.** Walk block bodies forward from there with
+   `get_blocks`, looking for the transaction that consumes the outpoint, then
+   confirm that candidate was itself accepted — of two conflicting spends only
+   one can be — and check its payload commits the id.
 
 Consequences, stated plainly:
 
@@ -82,36 +118,15 @@ Consequences, stated plainly:
   than a negative verdict — a node outage must never read as a fraudulent
   chain. Old chains need an archival node.
 - Measured on a synced mainnet node: a full pruning-point-to-tip scan is ~471
-  batches / ~19s over LAN gRPC. `--max-batches` is a runaway guard, and
-  exceeding it is reported as "ran out of budget", never as "not anchored".
-
-## Known blocker: the anchor field is circular
-
-`is_anchored` resolves `anchor.txid` and checks *that transaction's* payload
-for the attestation id. That is verifiable but **not constructible**:
-
-- the id is `H(body || signatures)`, and `body` contains `anchor.txid`
-- the anchor tx's payload must contain the id
-- a transaction's payload changes its txid
-
-So committing the id requires knowing the txid, and the txid depends on the
-payload that carries the id. There is no ordering that satisfies both, which
-is why the demo above uses a placeholder anchor: every command works, but a
-chain anchored this way cannot pass `verify` against a real node.
-
-SPEC §1.2 names the field `escrow_outpoint` — "txid:index **of settled
-escrow**" — which suggests the intended meaning is the outpoint the settlement
-transaction *spends*, not the settlement transaction itself. Under that
-reading the cycle disappears: the escrow outpoint exists before the settlement
-tx, and verification becomes "find the accepted tx that spends this outpoint,
-check its payload". That keeps the 36-byte layout and needs no domain-tag bump
-— it changes only verifier semantics. Not implemented, because it contradicts
-the current `is_anchored` contract; it needs a decision first.
+  batches / ~19s over LAN gRPC. `--max-batches` and `--max-spend-scan-blocks`
+  are runaway guards, and exhausting either is reported as "ran out of budget",
+  never as "not anchored".
 
 ## Next
 
-1. Resolve the anchor-field question above, then re-verify end to end against
-   a funded wallet on testnet-10.
+1. Run the loop for real against a funded wallet: `krep anchor --submit`, then
+   `krep verify`. Every step is implemented and the verifier is confirmed
+   against live mainnet settlements, but nothing has been broadcast yet.
 2. Escrow covenant (M2), including the unilateral-default path — `Default`
    attestations deliberately have no co-signed mirror, since "the owner
    defaulted" has no honest role-flipped form.

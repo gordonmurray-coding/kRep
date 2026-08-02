@@ -166,17 +166,16 @@ fn is_spendable(entry: &RpcUtxoEntry, virtual_daa_score: u64) -> bool {
     virtual_daa_score >= entry.block_daa_score.saturating_add(needed)
 }
 
-/// Fetch UTXOs, select enough to cover the fee, and build + sign the anchor tx.
-pub async fn build(
+/// The wallet's spendable outpoints, and the address they belong to.
+///
+/// These are the outpoints eligible to be named as an attestation's `anchor`:
+/// you pick one, both parties sign an attestation naming it, and the anchor
+/// transaction then spends exactly that outpoint.
+pub async fn spendable(
     rpc: &Arc<dyn RpcApi>,
     key: &Keypair,
-    ids: &[[u8; 32]],
-    feerate_override: Option<f64>,
-) -> Result<AnchorPlan> {
-    // Fail on a malformed id set before doing any network work.
-    build_payload(ids)?;
+) -> Result<(Address, Vec<(TransactionOutpoint, UtxoEntry)>)> {
     let address = wallet_address(rpc, key).await?;
-
     let dag = rpc.get_block_dag_info().await.map_err(|e| anyhow!("get_block_dag_info: {e}"))?;
     let entries = rpc
         .get_utxos_by_addresses(vec![address.clone()])
@@ -187,12 +186,29 @@ pub async fn build(
                  (this RPC needs the node started with --utxoindex)"
             )
         })?;
-
-    let utxos: Vec<(TransactionOutpoint, UtxoEntry)> = entries
+    let utxos = entries
         .into_iter()
         .filter(|e| is_spendable(&e.utxo_entry, dag.virtual_daa_score))
         .map(|e| (TransactionOutpoint::from(e.outpoint), UtxoEntry::from(e.utxo_entry)))
         .collect();
+    Ok((address, utxos))
+}
+
+/// Fetch UTXOs, select enough to cover the fee, and build + sign the anchor tx.
+///
+/// `must_spend` is the outpoint the attestations name as their anchor. It is
+/// pinned as an input, because that spend is precisely what verification looks
+/// for — an anchor transaction that does not consume it proves nothing.
+pub async fn build(
+    rpc: &Arc<dyn RpcApi>,
+    key: &Keypair,
+    ids: &[[u8; 32]],
+    feerate_override: Option<f64>,
+    must_spend: TransactionOutpoint,
+) -> Result<AnchorPlan> {
+    // Fail on a malformed id set before doing any network work.
+    build_payload(ids)?;
+    let (address, utxos) = spendable(rpc, key).await?;
     if utxos.is_empty() {
         bail!(
             "no spendable UTXOs for {address}\n\
@@ -212,7 +228,7 @@ pub async fn build(
             .max(MIN_FEERATE),
     };
 
-    plan_tx(&address, key, utxos, ids, feerate)
+    plan_tx(&address, key, utxos, ids, feerate, Some(must_spend))
 }
 
 /// The pure half of [`build`]: given a funded address's UTXOs, select inputs,
@@ -224,10 +240,26 @@ pub fn plan_tx(
     mut utxos: Vec<(TransactionOutpoint, UtxoEntry)>,
     ids: &[[u8; 32]],
     feerate: f64,
+    must_spend: Option<TransactionOutpoint>,
 ) -> Result<AnchorPlan> {
     let payload = build_payload(ids)?;
     // Largest first: fewest inputs, smallest fee.
     utxos.sort_by_key(|(_, e)| std::cmp::Reverse(e.amount));
+
+    // The pinned outpoint goes in first; everything else only tops up the fee.
+    if let Some(pinned) = must_spend {
+        let at = utxos.iter().position(|(op, _)| *op == pinned).ok_or_else(|| {
+            anyhow!(
+                "outpoint {}:{} is not a spendable UTXO of {address} — an anchor must spend the \
+                 outpoint its attestations name, so it has to be yours, unspent and mature. \
+                 Run `krep wallet-utxos` to see what is available.",
+                pinned.transaction_id,
+                pinned.index
+            )
+        })?;
+        let pinned_utxo = utxos.remove(at);
+        utxos.insert(0, pinned_utxo);
+    }
 
     let script_public_key = pay_to_address_script(address);
 
@@ -353,7 +385,7 @@ mod tests {
         let key = test_key();
         let address = address_for(Prefix::Testnet, &key);
         let id = [0xab; 32];
-        let plan = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[id], 1.0).unwrap();
+        let plan = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[id], 1.0, None).unwrap();
 
         assert_eq!(plan.payload, id.to_vec(), "payload must be exactly the attestation id");
         assert_eq!(plan.input_count, 1);
@@ -370,7 +402,7 @@ mod tests {
     fn rewriting_the_payload_invalidates_the_transaction() {
         let key = test_key();
         let address = address_for(Prefix::Testnet, &key);
-        let plan = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[0xab; 32]], 1.0).unwrap();
+        let plan = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[0xab; 32]], 1.0, None).unwrap();
         assert!(scripts_valid(&plan));
 
         // Strip the anchor commitment out of an otherwise untouched tx. If this
@@ -391,7 +423,7 @@ mod tests {
         let address = address_for(Prefix::Testnet, &key);
         let a = [0x11; 32];
         let b = [0x22; 32];
-        let plan = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[a, b], 1.0).unwrap();
+        let plan = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[a, b], 1.0, None).unwrap();
 
         assert_eq!(plan.payload.len(), 64);
         assert!(scripts_valid(&plan));
@@ -407,12 +439,12 @@ mod tests {
         let address = address_for(Prefix::Testnet, &key);
 
         // One tiny UTXO cannot even cover its own fee.
-        let err = plan_tx(&address, &key, funded(&address, &[10]), &[[1u8; 32]], 1.0).unwrap_err();
+        let err = plan_tx(&address, &key, funded(&address, &[10]), &[[1u8; 32]], 1.0, None).unwrap_err();
         assert!(err.to_string().contains("insufficient funds"), "got {err}");
 
         // Several mid-sized UTXOs, none of which covers a fee alone, are
         // consolidated until the selection pays for itself.
-        let plan = plan_tx(&address, &key, funded(&address, &[1_500, 1_500, 1_500]), &[[1u8; 32]], 1.0).unwrap();
+        let plan = plan_tx(&address, &key, funded(&address, &[1_500, 1_500, 1_500]), &[[1u8; 32]], 1.0, None).unwrap();
         assert!(plan.input_count > 1, "should have pulled several inputs, got {}", plan.input_count);
         assert!(scripts_valid(&plan));
         assert_eq!(plan.out_value, plan.total_in - plan.fee);
@@ -422,10 +454,51 @@ mod tests {
     fn higher_feerate_costs_more() {
         let key = test_key();
         let address = address_for(Prefix::Testnet, &key);
-        let cheap = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[1u8; 32]], 1.0).unwrap();
-        let dear = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[1u8; 32]], 10.0).unwrap();
+        let cheap = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[1u8; 32]], 1.0, None).unwrap();
+        let dear = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[1u8; 32]], 10.0, None).unwrap();
         assert!(dear.fee > cheap.fee, "{} vs {}", dear.fee, cheap.fee);
         assert_eq!(dear.mass, cheap.mass, "mass depends on shape, not on feerate");
+    }
+
+    #[test]
+    fn pinned_outpoint_is_always_spent() {
+        let key = test_key();
+        let address = address_for(Prefix::Testnet, &key);
+        let utxos = funded(&address, &[500_000_000, 400_000_000, 300_000_000]);
+        // The smallest one: greedy largest-first selection would never pick it.
+        let pinned = utxos[2].0;
+
+        let plan =
+            plan_tx(&address, &key, utxos.clone(), &[[1u8; 32]], 1.0, Some(pinned)).unwrap();
+        assert!(
+            plan.tx.inputs.iter().any(|i| i.previous_outpoint == pinned),
+            "the anchor outpoint must be consumed, or verification finds nothing"
+        );
+        assert_eq!(plan.tx.inputs[0].previous_outpoint, pinned, "pinned input goes first");
+        assert!(scripts_valid(&plan));
+
+        // Without pinning, the largest UTXO alone covers the fee and the small
+        // one is left untouched — which is exactly why pinning is required.
+        let unpinned = plan_tx(&address, &key, utxos, &[[1u8; 32]], 1.0, None).unwrap();
+        assert!(!unpinned.tx.inputs.iter().any(|i| i.previous_outpoint == pinned));
+    }
+
+    #[test]
+    fn pinning_an_outpoint_we_do_not_own_is_refused() {
+        let key = test_key();
+        let address = address_for(Prefix::Testnet, &key);
+        let stranger = TransactionOutpoint::new(TransactionId::from_bytes([0xee; 32]), 3);
+
+        let err = plan_tx(
+            &address,
+            &key,
+            funded(&address, &[500_000_000]),
+            &[[1u8; 32]],
+            1.0,
+            Some(stranger),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("not a spendable UTXO"), "got {err}");
     }
 
     /// Clone everything but the transaction (which the caller replaces).

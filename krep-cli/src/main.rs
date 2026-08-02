@@ -76,6 +76,10 @@ struct RpcOpts {
     /// itself; a full mainnet history measured ~471 batches / ~19s.
     #[arg(long, default_value_t = 4096)]
     max_batches: usize,
+    /// Budget, in blocks, for the forward scan that looks for the transaction
+    /// spending each anchor outpoint.
+    #[arg(long, default_value_t = 200_000)]
+    max_spend_scan_blocks: usize,
 }
 
 #[derive(Subcommand)]
@@ -101,7 +105,9 @@ enum Cmd {
         /// Existing chain file — used to fill prev/index automatically.
         #[arg(long)]
         chain: Option<PathBuf>,
-        /// Settlement outpoint: <txid_hex>:<output_index>
+        /// Anchor outpoint: <txid_hex>:<output_index>. This is the outpoint the
+        /// settlement transaction will SPEND, not the settlement's own txid —
+        /// see `krep wallet-utxos`.
         #[arg(long)]
         anchor: String,
         #[arg(long, value_enum)]
@@ -165,6 +171,14 @@ enum Cmd {
         #[arg(long, default_value = "mainnet")]
         network: String,
     },
+    /// List the wallet's spendable outpoints — candidates to name as an anchor.
+    WalletUtxos {
+        #[arg(long)]
+        wallet: PathBuf,
+        /// kaspad endpoint. Falls back to $KREP_RPC.
+        #[arg(long)]
+        rpc: Option<String>,
+    },
     /// Build a payload-carrying transaction committing one or two attestation
     /// ids. Prints the signed transaction; broadcasts only with --submit.
     Anchor {
@@ -174,6 +188,10 @@ enum Cmd {
         /// Attestation id to commit, hex. Repeat for a second (mirror) id.
         #[arg(long = "id", required = true)]
         ids: Vec<String>,
+        /// The outpoint to spend — must equal the `anchor` those attestations
+        /// name. Verification looks for the transaction that consumes it.
+        #[arg(long)]
+        spend: String,
         /// kaspad endpoint. Falls back to $KREP_RPC.
         #[arg(long)]
         rpc: Option<String>,
@@ -306,6 +324,7 @@ fn verify_chain(chain: &Chain, opts: &RpcOpts) -> Result<AnchorStatus> {
         scan_from,
         max_batches: opts.max_batches,
         min_confirmations: opts.min_confirmations,
+        max_spend_scan_blocks: opts.max_spend_scan_blocks,
     };
 
     let session = open_rpc(&url)?;
@@ -507,17 +526,40 @@ fn main() -> Result<()> {
                 .map_err(|e| anyhow!("bad --network {network:?}: {e}"))?;
             println!("{}", anchor::address_for(net.into(), &kp));
         }
-        Cmd::Anchor { wallet, ids, rpc: rpc_url, submit, fee_rate } => {
+        Cmd::WalletUtxos { wallet, rpc: rpc_url } => {
             let kp = load_wallet(&wallet)?;
-            let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
             let url = rpc::endpoint(&rpc_url).ok_or_else(|| {
                 anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
             })?;
             let session = open_rpc(&url)?;
-            let plan = session.rt.block_on(anchor::build(&session.client, &kp, &ids, fee_rate))?;
+            let (address, utxos) = session.rt.block_on(anchor::spendable(&session.client, &kp))?;
+            eprintln!("{} spendable outpoint(s) for {address}", utxos.len());
+            for (outpoint, entry) in &utxos {
+                println!("{}:{}\t{} sompi", outpoint.transaction_id, outpoint.index, entry.amount);
+            }
+        }
+        Cmd::Anchor { wallet, ids, spend, rpc: rpc_url, submit, fee_rate } => {
+            let kp = load_wallet(&wallet)?;
+            let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
+            let to_spend = parse_outpoint(&spend)?;
+            let url = rpc::endpoint(&rpc_url).ok_or_else(|| {
+                anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
+            })?;
+            let session = open_rpc(&url)?;
+            let plan = session.rt.block_on(anchor::build(
+                &session.client,
+                &kp,
+                &ids,
+                fee_rate,
+                kaspa_consensus_core::tx::TransactionOutpoint::new(
+                    RpcHash::from_bytes(to_spend.txid),
+                    to_spend.index,
+                ),
+            ))?;
             plan.self_check()?;
 
             eprintln!("anchor tx built from {} (signatures self-verified)", plan.address);
+            eprintln!("  spends anchor outpoint {}:{}", hex::encode(to_spend.txid), to_spend.index);
             eprintln!(
                 "  inputs {} totalling {} sompi -> 1 output of {} sompi",
                 plan.input_count, plan.total_in, plan.out_value
