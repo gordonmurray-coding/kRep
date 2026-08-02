@@ -124,6 +124,13 @@ enum Cmd {
         seed: PathBuf,
         #[arg(long)]
         context: String,
+        /// Also emit the role-flipped mirror attestation for the countersigner's
+        /// own chain, to <path>. Both ids can share one anchor transaction.
+        #[arg(long)]
+        mirror_out: Option<PathBuf>,
+        /// Chain file of the countersigner, used to fill the mirror's prev/index.
+        #[arg(long)]
+        mirror_chain: Option<PathBuf>,
     },
     /// Append a full attestation (stdin) to a chain file, creating it if missing.
     Append {
@@ -309,6 +316,49 @@ fn verify_chain(chain: &Chain, opts: &RpcOpts) -> Result<AnchorStatus> {
     Ok(AnchorStatus::Verified(session.url.clone()))
 }
 
+/// Build the mirror of a countersigned attestation: same settlement, same
+/// anchor, roles swapped, owned by the counterparty.
+///
+/// `outcome` is deliberately NOT copied blindly. An outcome is recorded
+/// *against the owner of the chain it sits in*, so flipping the owner changes
+/// what the field asserts:
+///
+/// - `Success` mirrors to `Success` — both sides performed, both earn credit.
+/// - `DisputedResolved` mirrors verbatim — the dispute was a joint fact.
+/// - `Default` has no honest mirror. It means "the owner defaulted"; writing it
+///   into the counterparty's chain would accuse the wronged party, and writing
+///   `Success` instead would silently assert something this settlement never
+///   established. It is also unobtainable in practice: the mirror must be
+///   countersigned by the defaulter, who will not sign. Defaults belong on the
+///   covenant's unilateral path (spec 1.5), not here.
+fn mirror_body(att: &Attestation, prev: Option<[u8; 32]>, index: u64) -> Result<AttestationBody> {
+    let outcome = match att.body.outcome {
+        Outcome::Success => Outcome::Success,
+        Outcome::DisputedResolved => Outcome::DisputedResolved,
+        Outcome::Default => bail!(
+            "refusing to mirror a Default attestation: an outcome is recorded against the chain \
+             owner, so there is no honest role-flipped form of \"the owner defaulted\". The \
+             counterparty's side of a default must come from the escrow covenant's unilateral \
+             path, which is the counter-signer of record on slashes."
+        ),
+    };
+    Ok(AttestationBody {
+        v: att.body.v,
+        anchor: att.body.anchor,
+        role: match att.body.role {
+            Role::Provider => Role::Client,
+            Role::Client => Role::Provider,
+        },
+        owner: att.body.counterparty,
+        counterparty: att.body.owner,
+        outcome,
+        amount_bucket: att.body.amount_bucket,
+        prev,
+        index,
+        ts: att.body.ts,
+    })
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Keygen { out } => {
@@ -360,11 +410,37 @@ fn main() -> Result<()> {
             let partial = create_partial(&kp, body)?;
             println!("{}", serde_json::to_string_pretty(&partial)?);
         }
-        Cmd::Countersign { seed, context } => {
+        Cmd::Countersign { seed, context, mirror_out, mirror_chain } => {
             let kp = load_keypair(&seed, &context)?;
             let partial: PartialAttestation = serde_json::from_str(&stdin_str()?)?;
             let att = countersign(&kp, partial)?;
             println!("{}", serde_json::to_string_pretty(&att)?);
+
+            if let Some(path) = mirror_out {
+                let me = kp.x_only_public_key().0;
+                // Position the mirror in the countersigner's own chain.
+                let (prev, index) = match &mirror_chain {
+                    Some(p) if p.exists() => {
+                        let c = load_chain(p)?;
+                        if c.owner != me {
+                            bail!("--mirror-chain owner does not match this seed+context pseudonym");
+                        }
+                        (c.head(), c.attestations.len() as u64)
+                    }
+                    _ => (None, 0),
+                };
+                let body = mirror_body(&att, prev, index)?;
+                // The mirror's owner is us, so we sign it first and the original
+                // owner countersigns — the same two-party handshake, mirrored.
+                let partial = create_partial(&kp, body)?;
+                fs::write(&path, serde_json::to_string_pretty(&partial)?)?;
+                eprintln!(
+                    "mirror partial written to {} — send it to {} to countersign, \
+                     then anchor both ids in one tx:\n  krep anchor --id <their id> --id <your id>",
+                    path.display(),
+                    hex::encode(att.body.owner.serialize())
+                );
+            }
         }
         Cmd::Append { chain } => {
             let att: Attestation = serde_json::from_str(&stdin_str()?)?;
@@ -464,4 +540,119 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use krep_core::{Attestation, derive_context_keypair};
+
+    fn kp(tag: &str) -> Keypair {
+        let mut seed = [0u8; 32];
+        seed[..tag.len()].copy_from_slice(tag.as_bytes());
+        derive_context_keypair(&seed, "test")
+    }
+
+    fn settlement(owner: &Keypair, cp: &Keypair, outcome: Outcome) -> Attestation {
+        let body = AttestationBody {
+            v: 1,
+            anchor: Outpoint { txid: [9u8; 32], index: 1 },
+            role: Role::Provider,
+            owner: owner.x_only_public_key().0,
+            counterparty: cp.x_only_public_key().0,
+            outcome,
+            amount_bucket: 3,
+            prev: None,
+            index: 0,
+            ts: 1_700_000_000,
+        };
+        countersign(cp, create_partial(owner, body).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn mirror_flips_roles_and_keeps_the_settlement() {
+        let a = kp("provider");
+        let b = kp("client");
+        let att = settlement(&a, &b, Outcome::Success);
+        let m = mirror_body(&att, None, 0).unwrap();
+
+        // Same settlement: same anchor, same size, same moment.
+        assert_eq!(m.anchor, att.body.anchor, "both sides must point at one settlement");
+        assert_eq!(m.amount_bucket, att.body.amount_bucket);
+        assert_eq!(m.ts, att.body.ts);
+        assert_eq!(m.v, att.body.v);
+
+        // Flipped: the counterparty now owns it, in the opposite role.
+        assert_eq!(m.owner, att.body.counterparty);
+        assert_eq!(m.counterparty, att.body.owner);
+        assert_eq!(att.body.role, Role::Provider);
+        assert_eq!(m.role, Role::Client);
+        assert!(m.validate_fields().is_ok());
+    }
+
+    #[test]
+    fn mirror_is_co_signable_and_lands_in_the_other_chain() {
+        let a = kp("provider");
+        let b = kp("client");
+        let att = settlement(&a, &b, Outcome::Success);
+
+        // B owns the mirror, so B signs first and A countersigns.
+        let m = mirror_body(&att, None, 0).unwrap();
+        let mirrored = countersign(&a, create_partial(&b, m).unwrap()).unwrap();
+        mirrored.verify().expect("mirror must be a valid co-signed attestation");
+
+        // Each attestation belongs to its own owner's chain, and the two are
+        // distinct objects with distinct ids sharing one anchor.
+        let mut chain_a = Chain::new(a.x_only_public_key().0);
+        let mut chain_b = Chain::new(b.x_only_public_key().0);
+        chain_a.append(att.clone()).expect("original belongs to A");
+        chain_b.append(mirrored.clone()).expect("mirror belongs to B");
+
+        assert_ne!(att.id(), mirrored.id(), "distinct attestations must have distinct ids");
+        assert_eq!(att.body.anchor, mirrored.body.anchor, "one settlement, one anchor tx");
+
+        // And the shared 64-byte payload commits both.
+        let payload = anchor::build_payload(&[att.id(), mirrored.id()]).unwrap();
+        assert_eq!(payload.len(), 64);
+        assert!(krep_core::kaspad::payload_commits(&payload, &att.id()));
+        assert!(krep_core::kaspad::payload_commits(&payload, &mirrored.id()));
+
+        // Both sides now score from the one settlement.
+        assert_eq!(chain_a.score().trades, 1);
+        assert_eq!(chain_b.score().trades, 1);
+    }
+
+    #[test]
+    fn mirror_appends_to_a_non_empty_chain() {
+        let a = kp("provider");
+        let b = kp("client");
+        let att = settlement(&a, &b, Outcome::Success);
+
+        // B already has history; the mirror must slot in at the right position.
+        let earlier = settlement(&b, &kp("someone-else"), Outcome::Success);
+        let mut chain_b = Chain::new(b.x_only_public_key().0);
+        chain_b.append(earlier).unwrap();
+
+        let m = mirror_body(&att, chain_b.head(), chain_b.attestations.len() as u64).unwrap();
+        let mirrored = countersign(&a, create_partial(&b, m).unwrap()).unwrap();
+        chain_b.append(mirrored).expect("mirror must link onto B's existing chain");
+
+        assert_eq!(chain_b.attestations.len(), 2);
+        chain_b.verify().expect("B's chain stays valid with the mirror appended");
+    }
+
+    #[test]
+    fn disputed_mirrors_verbatim_but_default_is_refused() {
+        let a = kp("provider");
+        let b = kp("client");
+
+        let disputed = settlement(&a, &b, Outcome::DisputedResolved);
+        let m = mirror_body(&disputed, None, 0).unwrap();
+        assert_eq!(m.outcome, Outcome::DisputedResolved, "a dispute is a joint fact");
+
+        // "The owner defaulted" has no honest role-flipped form.
+        let defaulted = settlement(&a, &b, Outcome::Default);
+        let err = mirror_body(&defaulted, None, 0).unwrap_err();
+        assert!(err.to_string().contains("refusing to mirror a Default"), "got {err}");
+    }
 }
