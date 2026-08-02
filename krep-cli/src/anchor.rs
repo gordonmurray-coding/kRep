@@ -308,7 +308,12 @@ pub fn plan_tx(
     );
     let entries: Vec<UtxoEntry> = selected.iter().map(|(_, e)| e.clone()).collect();
     let signable = MutableTransaction::with_entries(unsigned, entries.clone());
-    let tx = sign(signable, *key).tx;
+    let mut tx = sign(signable, *key).tx;
+    // `new_non_finalized` leaves the cached id zeroed and `sign` does not
+    // compute it, so without this `tx.id()` reports all zeros. The id covers
+    // the payload but not signature scripts, so finalizing after signing is
+    // equivalent to before — and doing it here means no caller can forget.
+    tx.finalize();
 
     Ok(AnchorPlan {
         tx,
@@ -393,6 +398,16 @@ mod tests {
         assert_eq!(plan.out_value, plan.total_in - plan.fee);
         assert!(plan.fee > 0, "an anchor that costs nothing proves nothing");
         assert!(plan.out_value < plan.total_in);
+
+        // The transaction must be finalized: an unfinalized tx reports a zeroed
+        // id, which would print a txid that identifies nothing.
+        assert_ne!(plan.tx.id(), TransactionId::from_bytes([0u8; 32]), "txid must be computed");
+        assert_eq!(plan.txid(), plan.tx.id().to_string());
+        // And the id must actually commit the payload we attached.
+        let mut other = plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[0xcd; 32]], 1.0, None)
+            .unwrap();
+        other.tx.finalize();
+        assert_ne!(plan.tx.id(), other.tx.id(), "a different payload must give a different txid");
 
         // The real assertion: consensus script validation accepts our signature.
         assert!(scripts_valid(&plan), "the signed anchor tx must pass script validation");

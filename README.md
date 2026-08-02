@@ -122,12 +122,28 @@ Consequences, stated plainly:
   are runaway guards, and exhausting either is reported as "ran out of budget",
   never as "not anchored".
 
+## Proven on mainnet
+
+The loop has been run end to end against a synced mainnet node (2026-08):
+
+| | |
+|---|---|
+| anchor outpoint (spent) | `6a9d697c7bc95a26f71633b2133a89d51037fad39cf4f44ef758f5d4189f1358:0` |
+| settlement tx | `330861aab9269ba031a3489397a8229f74cb1269c1d2064ef896ba649f5edfa5` |
+| payload | 64 bytes = `id(A) ‖ id(B)`, two mirrored attestations |
+| fee | 169,900 sompi (mass 1699 at feerate 100) |
+| result | both chains `"anchor_status": "verified"`, one trade scored on each side |
+
+The predicted txid matched the broadcast one exactly, and verification takes
+~25s (a full pruning-point-to-tip scan).
+
+Negative control: an identically co-signed chain naming a *real but unspent*
+outpoint is rejected with "attestation not anchored on-chain" and exit code 1.
+Nothing spent it, so nothing anchors it — which is the whole point.
+
 ## Next
 
-1. Run the loop for real against a funded wallet: `krep anchor --submit`, then
-   `krep verify`. Every step is implemented and the verifier is confirmed
-   against live mainnet settlements, but nothing has been broadcast yet.
-2. Escrow covenant (M2), including the unilateral-default path — `Default`
+1. Escrow covenant (M2), including the unilateral-default path — `Default`
    attestations deliberately have no co-signed mirror, since "the owner
    defaulted" has no honest role-flipped form.
 
