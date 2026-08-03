@@ -220,7 +220,9 @@ krep escrow ship   --escrow job.json --wallet maker.key --tracking <hash> --rpc 
 krep escrow settle --escrow job.json --wallet buyer.key --id <att> --id <att> --rpc <url> --submit
 ```
 
-`slash` and `refund` replace `settle` on the failure paths. Without `--submit`
+`dispute` / `resolve` and `slash` / `refund` replace `settle` on the failure
+paths. Resolution takes two signatures — `--wallet` for the beneficiary and
+`--arbiter-key` for the arbiter. Without `--submit`
 nothing is sent and the state file is left untouched, so a dry run cannot
 desynchronise the client from the chain.
 
@@ -239,6 +241,23 @@ Full happy path, run on testnet-10 through these commands:
 | CLAIM | `2ad9984b8218fb70a3d7798da6414c82eb0afc37852374d1468753ba8cc8813a` |
 | SHIP | `5812766cd8c2c131c479b7243619c4753b239cac12ac933c396285afaf9c7822` |
 | SETTLE | `23b037e6f4e780bf1a95e16c760897f8b2dac361632e3bf9bac4ce3195fe2436` |
+
+Every other branch has since been run on testnet-10 too: `refund` on an escrow
+nobody claimed, and `dispute` → `resolve` on an arbitrated one. Together with
+the slash run below, that is the entire state machine exercised against
+consensus rather than only against the local VM.
+
+Two things only the network could teach:
+
+- **Script-unit budget.** An input commits a budget in sigop units (one unit
+  buys 100,000 script units). A covenant input needs several, because the
+  dispatcher scans past every earlier arm to reach the one being taken — cost
+  grows with the whole script, not the branch. The arbitrated covenant's last
+  arms measured ~205,000 units, so claim and ship succeeded on a budget that
+  resolution was rejected for.
+- **Lock-time finality.** A transaction whose lock time has not *passed* is not
+  finalized and is rejected outright; equal to the current DAA score counts as
+  not passed. `ship` records `shipped_at` slightly in the past for this reason.
 
 ### The unilateral default, driven on testnet-10
 

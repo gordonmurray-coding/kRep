@@ -77,9 +77,10 @@ pub async fn covenant_fee(rpc: &Arc<dyn RpcApi>) -> u64 {
         .filter(|f| f.is_finite() && *f > 0.0)
         .unwrap_or(100.0)
         .max(100.0);
-    // ~6000 mass covers a covenant spend with a fee input and two outputs,
-    // with room to spare; the amounts at stake dwarf the difference.
-    (feerate * 6000.0).ceil() as u64
+    // A covenant spend carries the whole redeem script plus the previous state,
+    // and commits several sigop units for script-unit budget, each worth 1000
+    // grams. ~12000 mass covers that with room to spare.
+    (feerate * 12000.0).ceil() as u64
 }
 
 pub async fn wallet_utxos(
@@ -152,7 +153,7 @@ async fn transition(
     terms: &Terms,
     live: &Live,
     branch: Branch,
-    needs_sig: bool,
+    signers: Vec<Keypair>,
     extra_in: u64,
     outputs_for: impl Fn(u64, &kaspa_consensus_core::tx::ScriptPublicKey) -> Vec<TransactionOutput>,
     payload: Vec<u8>,
@@ -183,7 +184,7 @@ async fn transition(
                 branch,
                 prev_rest: hex::decode(&live.prev_rest)?,
                 prev_payload: hex::decode(&live.prev_payload)?,
-                needs_sig,
+                signers,
                 script,
             },
         },
@@ -233,7 +234,7 @@ pub async fn claim(
         terms,
         live,
         Branch::Claim,
-        false,
+        vec![],
         terms.maker_bond,
         move |_, _| vec![TransactionOutput { value: claimed_value, script_public_key: esc.clone(), covenant: None }],
         state.encode().to_vec(),
@@ -278,7 +279,7 @@ pub async fn ship(
         terms,
         live,
         Branch::Ship,
-        true,
+        vec![*key],
         0,
         move |_, _| vec![TransactionOutput { value, script_public_key: esc.clone(), covenant: None }],
         state.encode().to_vec(),
@@ -300,6 +301,7 @@ pub async fn payout(
     beneficiary: secp256k1::XOnlyPublicKey,
     ids: &[[u8; 32]],
     lock_time: u64,
+    signers: Vec<Keypair>,
 ) -> Result<(Transaction, Live)> {
     if ids.is_empty() || ids.len() > 2 {
         bail!("a settlement commits one or two attestation ids");
@@ -324,7 +326,7 @@ pub async fn payout(
         terms,
         live,
         branch,
-        true,
+        signers,
         0,
         move |_, _| vec![TransactionOutput { value, script_public_key: spk.clone(), covenant: None }],
         payload,
@@ -332,6 +334,41 @@ pub async fn payout(
     )
     .await?;
     next.phase = "settled".into();
+    Ok((tx, next))
+}
+
+/// Contest a delivery. Only the buyer may, and only on an arbitrated escrow —
+/// with nobody to adjudicate, a dispute would strand the funds forever, so the
+/// covenant simply has no such branch.
+pub async fn dispute(
+    rpc: &Arc<dyn RpcApi>,
+    key: &Keypair,
+    terms: &Terms,
+    live: &Live,
+) -> Result<(Transaction, Live)> {
+    if !terms.arbitrated() {
+        bail!("this escrow runs in pure-timeout mode and has no dispute path");
+    }
+    let prev = EscrowState::decode(&hex::decode(&live.prev_payload)?)
+        .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
+    // A dispute contests the delivery; it does not rewrite what was delivered.
+    let state = EscrowState { phase: Phase::Disputed, ..prev };
+    let esc = escrow_spk(terms).map_err(|e| anyhow!("{e}"))?;
+    let value = live.value;
+    let (tx, mut next) = transition(
+        rpc,
+        key,
+        terms,
+        live,
+        Branch::Dispute,
+        vec![*key],
+        0,
+        move |_, _| vec![TransactionOutput { value, script_public_key: esc.clone(), covenant: None }],
+        state.encode().to_vec(),
+        0,
+    )
+    .await?;
+    next.phase = "disputed".into();
     Ok((tx, next))
 }
 
@@ -357,7 +394,7 @@ pub async fn refund(
         terms,
         live,
         Branch::Refund,
-        true,
+        vec![*key],
         0,
         move |_, _| vec![TransactionOutput { value, script_public_key: spk.clone(), covenant: None }],
         vec![],

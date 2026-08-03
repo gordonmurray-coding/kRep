@@ -18,6 +18,18 @@ use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::EngineFlags;
 use secp256k1::Keypair;
 
+/// Script-unit budget an input commits to, expressed in sigop units — one unit
+/// buys 100,000 script units.
+///
+/// A plain wallet input needs one. A covenant input needs far more: the
+/// dispatcher has to scan past every earlier arm to reach the one being taken,
+/// so cost grows with the whole script, not just the branch. The arbitrated
+/// covenant's last arms measured ~205,000 units, which is why 1 is not enough
+/// and why this is generous rather than tight — running out is a rejected
+/// transaction, while over-committing only costs a little mass.
+const COVENANT_SIGOPS: u8 = 4;
+const WALLET_SIGOPS: u8 = 1;
+
 /// A covenant spend carries the whole redeem script and the previous state in
 /// its signature script, so these transactions are heavy — a claim measures
 /// around 4600 compute mass against a 100 sompi/gram floor. Callers should
@@ -35,8 +47,11 @@ pub enum Unlock {
         branch: Branch,
         prev_rest: Vec<u8>,
         prev_payload: Vec<u8>,
-        /// Whether the branch expects a signature argument beneath the state.
-        needs_sig: bool,
+        /// Keys whose signatures the branch expects beneath the state, in
+        /// bottom-to-top push order. Empty for branches that take none (claim);
+        /// one for the single-signer branches; two for arbiter resolution,
+        /// which needs the beneficiary *and* the arbiter.
+        signers: Vec<Keypair>,
         script: Vec<u8>,
     },
 }
@@ -50,8 +65,11 @@ pub struct Input {
 /// Assemble and sign. Signatures cover the whole transaction, so the sighashes
 /// are computed against a skeleton with empty signature scripts and filled in
 /// afterwards — signature scripts are not themselves part of the sighash.
+///
+/// `wallet` signs the ordinary inputs; covenant inputs are signed by whichever
+/// keys their branch names, which need not be the same party.
 pub fn build(
-    key: &Keypair,
+    wallet: &Keypair,
     inputs: &[Input],
     outputs: Vec<TransactionOutput>,
     payload: Vec<u8>,
@@ -67,7 +85,13 @@ pub fn build(
                     previous_outpoint: i.outpoint,
                     signature_script: sig,
                     sequence: 0,
-                    compute_commit: ComputeCommit::SigopCount(1.into()),
+                    compute_commit: ComputeCommit::SigopCount(
+                        match i.unlock {
+                            Unlock::Wallet => WALLET_SIGOPS,
+                            Unlock::Covenant { .. } => COVENANT_SIGOPS,
+                        }
+                        .into(),
+                    ),
                 })
                 .collect(),
             outputs.clone(),
@@ -83,10 +107,10 @@ pub fn build(
     let populated = PopulatedTransaction::new(&empty, entries);
     let reused = SigHashReusedValuesUnsync::new();
 
-    let sign = |idx: usize| {
+    let sign = |idx: usize, k: &Keypair| {
         let hash = calc_schnorr_signature_hash(&populated, idx, SIG_HASH_ALL, &reused);
         let msg = secp256k1::Message::from_digest(hash.as_bytes());
-        let mut sig = key.sign_schnorr(msg).as_ref().to_vec();
+        let mut sig = k.sign_schnorr(msg).as_ref().to_vec();
         sig.push(SIG_HASH_ALL.to_u8());
         sig
     };
@@ -95,11 +119,11 @@ pub fn build(
         .iter()
         .enumerate()
         .map(|(idx, i)| match &i.unlock {
-            Unlock::Wallet => builder().add_data(&sign(idx)).unwrap().drain(),
-            Unlock::Covenant { branch, prev_rest, prev_payload, needs_sig, script } => {
+            Unlock::Wallet => builder().add_data(&sign(idx, wallet)).unwrap().drain(),
+            Unlock::Covenant { branch, prev_rest, prev_payload, signers, script } => {
                 let mut b = builder();
-                if *needs_sig {
-                    b.add_data(&sign(idx)).unwrap();
+                for k in signers {
+                    b.add_data(&sign(idx, k)).unwrap();
                 }
                 b.add_data(prev_rest)
                     .unwrap()

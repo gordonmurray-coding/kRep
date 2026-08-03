@@ -172,6 +172,11 @@ enum Cmd {
         #[arg(long, default_value = "mainnet")]
         network: String,
     },
+    /// Print a wallet key's x-only pubkey — what escrow terms name.
+    WalletPubkey {
+        #[arg(long)]
+        wallet: PathBuf,
+    },
     /// List the wallet's spendable outpoints — candidates to name as an anchor.
     WalletUtxos {
         #[arg(long)]
@@ -222,6 +227,12 @@ enum Cmd {
         #[arg(long)]
         rpc: Option<String>,
     },
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+enum ResolveTo {
+    Maker,
+    Buyer,
 }
 
 #[derive(Subcommand)]
@@ -321,6 +332,37 @@ enum EscrowCmd {
         #[arg(long)]
         wallet: PathBuf,
         /// Attestation id to commit, hex. Repeat for the mirror.
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Contest a delivery (buyer, arbitrated escrows only).
+    Dispute {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Resolve a dispute (arbiter plus the beneficiary).
+    Resolve {
+        #[arg(long)]
+        escrow: PathBuf,
+        /// The beneficiary's wallet — the maker's or the buyer's.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// The arbiter's key file. Resolution needs both signatures.
+        #[arg(long)]
+        arbiter_key: PathBuf,
+        /// Who the dispute is resolved in favour of.
+        #[arg(long, value_enum)]
+        to: ResolveTo,
         #[arg(long = "id", required = true)]
         ids: Vec<String>,
         #[arg(long)]
@@ -636,6 +678,7 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
                 maker,
                 &ids,
                 0,
+                vec![key],
             ))?;
             finish(&s, &mut f, &path, tx, next, submit, "SETTLE")?;
         }
@@ -656,8 +699,47 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
                 buyer,
                 &ids,
                 deadline,
+                vec![key],
             ))?;
             finish(&s, &mut f, &path, tx, next, submit, "SLASH")?;
+        }
+        EscrowCmd::Dispute { escrow: path, wallet, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let s = escrow_session(&rpc)?;
+            let (tx, next) = s.rt.block_on(escrow::dispute(&s.client, &key, &f.terms, live))?;
+            finish(&s, &mut f, &path, tx, next, submit, "DISPUTE")?;
+        }
+        EscrowCmd::Resolve { escrow: path, wallet, arbiter_key, to, ids, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let arbiter = load_wallet(&arbiter_key)?;
+            let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
+            let state = krep_escrow::state::EscrowState::decode(&hex::decode(&live.prev_payload)?)
+                .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
+            let (branch, beneficiary) = match to {
+                ResolveTo::Maker => (
+                    krep_escrow::script::Branch::ResolveToMaker,
+                    state.maker.ok_or_else(|| anyhow!("escrow has no maker"))?,
+                ),
+                ResolveTo::Buyer => (krep_escrow::script::Branch::ResolveToBuyer, f.terms.buyer),
+            };
+            let s = escrow_session(&rpc)?;
+            // Beneficiary first, arbiter above it — the order the branch reads.
+            let (tx, next) = s.rt.block_on(escrow::payout(
+                &s.client,
+                &key,
+                &f.terms,
+                live,
+                branch,
+                beneficiary,
+                &ids,
+                0,
+                vec![key, arbiter],
+            ))?;
+            finish(&s, &mut f, &path, tx, next, submit, "RESOLVE")?;
         }
         EscrowCmd::Refund { escrow: path, wallet, rpc, submit } => {
             let mut f = escrow::load(&path)?;
@@ -818,6 +900,9 @@ fn main() -> Result<()> {
             let net = NetworkType::from_str(&network)
                 .map_err(|e| anyhow!("bad --network {network:?}: {e}"))?;
             println!("{}", anchor::address_for(net.into(), &kp));
+        }
+        Cmd::WalletPubkey { wallet } => {
+            println!("{}", hex::encode(load_wallet(&wallet)?.x_only_public_key().0.serialize()));
         }
         Cmd::WalletUtxos { wallet, rpc: rpc_url } => {
             let kp = load_wallet(&wallet)?;
