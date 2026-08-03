@@ -15,6 +15,7 @@
 //!   krep score  --chain mychain.json --rpc grpc://node:16110
 
 mod anchor;
+mod board;
 mod escrow;
 mod rpc;
 
@@ -232,6 +233,11 @@ enum Cmd {
         #[arg(long)]
         fee_rate: Option<f64>,
     },
+    /// The FabMesh job board, over Nostr.
+    Job {
+        #[command(subcommand)]
+        cmd: JobCmd,
+    },
     /// Drive a FabMesh escrow covenant.
     Escrow {
         #[command(subcommand)]
@@ -244,6 +250,127 @@ enum Cmd {
         /// kaspad endpoint. Falls back to $KREP_RPC.
         #[arg(long)]
         rpc: Option<String>,
+    },
+}
+
+#[derive(clap::Args, Clone)]
+struct RelayOpts {
+    /// Relay to use. Repeatable; falls back to $KREP_RELAYS (comma separated).
+    /// Several is the point — one relay dropping a job only censors whoever
+    /// asked it alone.
+    #[arg(long = "relay")]
+    relays: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum JobCmd {
+    /// Publish a job, deriving its terms from the escrow that backs it.
+    Post {
+        /// The escrow this job is backed by. Reward, bond, deadline and file
+        /// hash all come from it, so the posting cannot advertise terms the
+        /// escrow will not honour.
+        #[arg(long)]
+        escrow: PathBuf,
+        /// The buyer's pseudonym — also their Nostr identity.
+        #[arg(long, requires = "context")]
+        seed: PathBuf,
+        #[arg(long)]
+        context: Option<String>,
+        /// Stable identifier for this posting; editing it replaces the job.
+        #[arg(long)]
+        job_id: String,
+        #[arg(long)]
+        process: String,
+        #[arg(long)]
+        material: String,
+        #[arg(long, default_value = "standard")]
+        tolerance: String,
+        #[arg(long, default_value_t = 1)]
+        qty: u32,
+        /// Coarse only — continent or country. Never a street address.
+        #[arg(long)]
+        region: String,
+        /// Where the *encrypted* design file lives.
+        #[arg(long)]
+        file_ptr: String,
+        /// The buyer's chain head, if they publish one.
+        #[arg(long)]
+        rep_head: Option<String>,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// List open jobs.
+    List {
+        #[arg(long)]
+        process: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// Claim a job, advertising reputation and a funded bond.
+    Claim {
+        #[arg(long)]
+        job_addr: String,
+        /// The maker's pseudonym — the identity the escrow will bind.
+        #[arg(long, requires = "context")]
+        seed: PathBuf,
+        #[arg(long)]
+        context: Option<String>,
+        /// The maker's chain, to advertise its head.
+        #[arg(long)]
+        chain: Option<PathBuf>,
+        /// Payment key the escrow should pay on settlement.
+        #[arg(long)]
+        payment: String,
+        /// Transaction that funded the bond, so the buyer can check it.
+        #[arg(long)]
+        bond_txid: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// Show the claims on a job.
+    Claims {
+        #[arg(long)]
+        job_addr: String,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// Designate a winning claim and point it at the funded escrow.
+    Accept {
+        #[arg(long)]
+        job_addr: String,
+        #[arg(long, requires = "context")]
+        seed: PathBuf,
+        #[arg(long)]
+        context: Option<String>,
+        #[arg(long)]
+        claim_id: String,
+        /// The opened escrow the winner should claim against.
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long, default_value = "mainnet")]
+        network: String,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// Has this job been awarded, and to whom? What a maker polls after claiming.
+    Awarded {
+        #[arg(long)]
+        job_addr: String,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// Check a posting against the escrow it claims to be backed by.
+    Verify {
+        #[arg(long)]
+        job_addr: String,
+        #[arg(long)]
+        escrow: PathBuf,
+        #[command(flatten)]
+        relay: RelayOpts,
     },
 }
 
@@ -651,6 +778,161 @@ fn escrow_session(rpc: &Option<String>) -> Result<RpcSession> {
         anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
     })?;
     open_rpc(&url)
+}
+
+fn board_rt() -> Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .worker_threads(2)
+        .build()
+        .context("starting tokio runtime")
+}
+
+fn report(what: &str, id: &str, results: Vec<(String, String)>) {
+    eprintln!("{what} {id}");
+    for (relay, verdict) in &results {
+        eprintln!("  {relay}: {verdict}");
+    }
+    if results.iter().all(|(_, v)| v != "accepted") {
+        eprintln!("WARNING: no relay accepted it — nobody can see this yet");
+    }
+    println!("{id}");
+}
+
+fn run_job(cmd: JobCmd) -> Result<()> {
+    let rt = board_rt()?;
+    match cmd {
+        JobCmd::Post {
+            escrow: path,
+            seed,
+            context,
+            job_id,
+            process,
+            material,
+            tolerance,
+            qty,
+            region,
+            file_ptr,
+            rep_head,
+            relay,
+        } => {
+            let urls = board::relays(&relay.relays)?;
+            let ctx = context.ok_or_else(|| anyhow!("--context is required"))?;
+            let key = load_keypair(&seed, &ctx)?;
+            let f = escrow::load(&path)?;
+            let posting = board::posting_from_escrow(
+                &f.terms, process, material, tolerance, qty, region, file_ptr, rep_head,
+            );
+            let (addr, results) = rt.block_on(board::post(&urls, &key, &job_id, &posting, now()))?;
+            eprintln!("job address {addr}");
+            report("posted", &addr, results);
+        }
+        JobCmd::List { process, region, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let jobs = rt.block_on(board::list(&urls, process.as_deref(), region.as_deref()))?;
+            eprintln!("{} job(s)", jobs.len());
+            for (id, p, e) in jobs {
+                println!(
+                    "{}\n  {} {} x{} to {} | reward {} bond {} | deadline {} | escrow {}",
+                    krep_board::job::job_address(&e.author()?, &id),
+                    p.process,
+                    p.material,
+                    p.qty,
+                    p.ship_region,
+                    p.reward,
+                    p.maker_bond,
+                    p.deadline,
+                    &p.escrow_template[..16]
+                );
+            }
+        }
+        JobCmd::Claim { job_addr, seed, context, chain, payment, bond_txid, note, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let ctx = context.ok_or_else(|| anyhow!("--context is required"))?;
+            let key = load_keypair(&seed, &ctx)?;
+            let rep_head = match &chain {
+                Some(c) if c.exists() => load_chain(c)?.head().map(hex::encode).unwrap_or_default(),
+                _ => String::new(),
+            };
+            let c = krep_board::job::Claim {
+                v: 1,
+                rep_head,
+                rep_pubkey: hex::encode(key.x_only_public_key().0.serialize()),
+                payment_pubkey: payment,
+                bond_txid,
+                note,
+            };
+            let (id, results) = rt.block_on(board::claim(&urls, &key, &job_addr, &c, now()))?;
+            report("claimed", &id, results);
+        }
+        JobCmd::Claims { job_addr, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let claims = rt.block_on(board::claims_for(&urls, &job_addr))?;
+            eprintln!("{} claim(s) on {job_addr}", claims.len());
+            for (c, e) in claims {
+                println!(
+                    "{}\n  rep {} head {} | pay {} | bond tx {}{}",
+                    e.id,
+                    &c.rep_pubkey[..16.min(c.rep_pubkey.len())],
+                    if c.rep_head.is_empty() { "(none)" } else { &c.rep_head[..16.min(c.rep_head.len())] },
+                    &c.payment_pubkey[..16.min(c.payment_pubkey.len())],
+                    &c.bond_txid[..16.min(c.bond_txid.len())],
+                    c.note.map(|n| format!(" | {n}")).unwrap_or_default()
+                );
+            }
+        }
+        JobCmd::Accept { job_addr, seed, context, claim_id, escrow: path, network, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let ctx = context.ok_or_else(|| anyhow!("--context is required"))?;
+            let key = load_keypair(&seed, &ctx)?;
+            let f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| {
+                anyhow!("that escrow is not open yet — fund it before accepting, or the winner has nothing to claim")
+            })?;
+            let net = NetworkType::from_str(&network).map_err(|e| anyhow!("bad --network: {e}"))?;
+            let a = krep_board::job::Acceptance {
+                v: 1,
+                claim_id,
+                escrow_address: krep_escrow::script::escrow_address(&f.terms, net.into())
+                    .map_err(|e| anyhow!("{e}"))?
+                    .to_string(),
+                escrow_outpoint: live.outpoint.clone(),
+            };
+            let (id, results) = rt.block_on(board::accept(&urls, &key, &job_addr, &a, now()))?;
+            report("accepted", &id, results);
+        }
+        JobCmd::Awarded { job_addr, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            match rt.block_on(board::acceptance_for(&urls, &job_addr))? {
+                None => eprintln!("no acceptance yet for {job_addr}"),
+                Some((a, e)) => {
+                    eprintln!("awarded by the buyer at {}", e.created_at);
+                    eprintln!("  winning claim {}", a.claim_id);
+                    eprintln!("  escrow        {}", a.escrow_address);
+                    eprintln!("  outpoint      {}", a.escrow_outpoint);
+                    eprintln!(
+                        "Check that escrow against the posting before bonding anything:\n                           krep job verify --job-addr {job_addr} --escrow <file>"
+                    );
+                    println!("{}", a.claim_id);
+                }
+            }
+        }
+        JobCmd::Verify { job_addr, escrow: path, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let f = escrow::load(&path)?;
+            let jobs = rt.block_on(board::list(&urls, None, None))?;
+            let found = jobs
+                .into_iter()
+                .find(|(id, _, e)| {
+                    e.author().map(|a| krep_board::job::job_address(&a, id) == job_addr).unwrap_or(false)
+                })
+                .ok_or_else(|| anyhow!("no posting found at {job_addr}"))?;
+            board::matches_escrow(&found.1, &f.terms)?;
+            eprintln!("posting matches the escrow it names: reward, bond, deadline and file hash all agree");
+            println!("{job_addr}");
+        }
+    }
+    Ok(())
 }
 
 fn run_escrow(cmd: EscrowCmd) -> Result<()> {
@@ -1079,6 +1361,7 @@ fn main() -> Result<()> {
                 println!("{}:{}\t{} sompi", outpoint.transaction_id, outpoint.index, entry.amount);
             }
         }
+        Cmd::Job { cmd } => run_job(cmd)?,
         Cmd::Escrow { cmd } => run_escrow(cmd)?,
         Cmd::Submit { tx, rpc: rpc_url } => {
             let raw = fs::read_to_string(&tx).with_context(|| format!("reading {}", tx.display()))?;
