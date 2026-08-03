@@ -1,5 +1,5 @@
 [workspace]
-members = ["krep-core", "krep-cli"]
+members = ["krep-core", "krep-cli", "krep-escrow"]
 resolver = "2"
 
 [workspace.package]

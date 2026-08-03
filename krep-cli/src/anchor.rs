@@ -575,7 +575,7 @@ mod tests {
                 .collect(),
             plan.tx.outputs.clone(),
             back.lock_time,
-            back.subnetwork_id.clone(),
+            back.subnetwork_id,
             back.gas,
             back.payload.clone(),
         );
