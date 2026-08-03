@@ -336,10 +336,61 @@ A covenant witness may never carry a `Success` — otherwise driving your own
 covenant would be a way to mint praise. It is only ever an answer to "the
 subject would refuse to sign this".
 
+## M3 — the job board
+
+Postings, claims and acceptances are Nostr events. No server of record, nobody
+to subpoena, anyone can run a relay.
+
+```bash
+export KREP_RELAYS=wss://nos.lol,wss://relay.damus.io
+
+# the posting derives its terms from the escrow that backs it
+krep job post --escrow job.json --seed buyer.seed --context fabmesh \
+  --job-id my-bracket --process fdm --material petg --qty 2 --region EU \
+  --file-ptr https://blossom.example/encrypted
+
+krep job list
+krep job claim  --job-addr <addr> --seed maker.seed --context fabmesh \
+  --chain m.chain.json --payment <pk> --bond-txid <txid>
+krep job claims --job-addr <addr>
+krep job accept --job-addr <addr> --seed buyer.seed --context fabmesh \
+  --claim-id <id> --escrow job.json --network testnet
+krep job awarded --job-addr <addr>          # what a maker polls
+krep job verify  --job-addr <addr> --escrow job.json
+```
+
+Kinds, which SPEC 2.2 left "TBD": **30402** postings (parameterized
+replaceable, so editing a job replaces it under a stable `d` tag and claims stay
+attached across edits), **1403** claims and **1404** acceptances. Those two are
+deliberately *not* replaceable — their purpose is an immutable record of who
+said what and when, and a rewritable claim could be altered after acceptance.
+
+A kRep pseudonym is directly usable as a Nostr identity — same curve, same
+schnorr primitive as attestations — so a chain head and the events advertising
+it are provably the same person.
+
+### Relays are untrusted
+
+Every event has its id recomputed and its signature checked on arrival.
+Replaceable events are de-duplicated locally rather than trusting the relay,
+since an old revision resurfacing would show a stale reward. Acceptances from
+anyone but the job's author are discarded — otherwise a stranger could redirect
+a maker to an escrow they control. Publishing reports each relay separately,
+because "one relay accepted it" and "the job is visible" are different claims.
+
+`job post` derives reward, bond, deadline and file hash from the escrow, so a
+posting cannot advertise terms the escrow will not honour, and `job verify`
+re-checks that for the maker. The posting is words on a relay; the escrow
+address is what holds the money.
+
+Run against public relays: a posting, a claim carrying an anchored chain head,
+and an acceptance pointing at a funded testnet escrow — published, read back and
+verified. `relay.damus.io` returned 503 while `nos.lol` accepted, which is
+exactly why publishing is multi-relay and reports per-relay verdicts.
+
 ## Next
 
-1. M3 — Nostr job board client, and M4, the dogfood run: one real end-to-end
-   job through a physical printer.
+1. M4 — the dogfood run: one real end-to-end job through a physical printer.
 
 ## Deliberate design points (don't "fix" these)
 

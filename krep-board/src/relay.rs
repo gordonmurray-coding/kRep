@@ -18,12 +18,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Debug, Error)]
 pub enum RelayError {
-    #[error("connecting to {url}: {source}")]
-    Connect {
-        url: String,
-        #[source]
-        source: tokio_tungstenite::tungstenite::Error,
-    },
+    #[error("connecting to {url}: {reason}")]
+    Connect { url: String, reason: String },
     #[error("{0}")]
     Io(String),
 }
@@ -45,11 +41,26 @@ pub struct Filter {
     pub limit: Option<u32>,
 }
 
+/// Connect, but never hang.
+///
+/// A relay that accepts the TCP connection and then goes quiet — or a TLS
+/// handshake that stalls — would otherwise block forever, since the read
+/// timeout only covers the message loop. An unreachable relay must cost a
+/// bounded wait, not the whole command.
+async fn connect(
+    url: &str,
+    timeout: Duration,
+) -> Result<tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>> {
+    match tokio::time::timeout(timeout, tokio_tungstenite::connect_async(url)).await {
+        Err(_) => Err(RelayError::Connect { url: url.into(), reason: format!("no response in {timeout:?}") }),
+        Ok(Err(e)) => Err(RelayError::Connect { url: url.into(), reason: e.to_string() }),
+        Ok(Ok((ws, _))) => Ok(ws),
+    }
+}
+
 /// Publish one event to one relay, reporting what the relay said.
 pub async fn publish(url: &str, event: &Event, timeout: Duration) -> Result<String> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|source| RelayError::Connect { url: url.into(), source })?;
+    let mut ws = connect(url, timeout).await?;
     ws.send(Message::Text(json!(["EVENT", event]).to_string()))
         .await
         .map_err(|e| RelayError::Io(e.to_string()))?;
@@ -82,9 +93,7 @@ pub async fn publish(url: &str, event: &Event, timeout: Duration) -> Result<Stri
 
 /// Query one relay, returning only events that actually verify.
 pub async fn query(url: &str, filter: &Filter, timeout: Duration) -> Result<Vec<Event>> {
-    let (mut ws, _) = tokio_tungstenite::connect_async(url)
-        .await
-        .map_err(|source| RelayError::Connect { url: url.into(), source })?;
+    let mut ws = connect(url, timeout).await?;
     let sub = "krep";
     ws.send(Message::Text(json!(["REQ", sub, filter]).to_string()))
         .await
