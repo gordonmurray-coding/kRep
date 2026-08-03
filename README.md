@@ -530,32 +530,37 @@ anchored when the transaction *spending its anchor outpoint* carries its id —
 and are pinned by regression tests against transactions that really settled on
 testnet-10 during the M2–M4 runs.
 
-### The hash question, with the toolchain installed
+### Poseidon2, matched against the real compiler
 
-nargo 1.0.0-beta.26 is in, and probing it changed the picture. Its stdlib
-exposes `poseidon2_permutation` (state size 4) and `pedersen_hash`; **Poseidon
-v1 and sha256 are not in the stdlib at all** — both moved to external
-libraries. Reference vectors from the real compiler are vendored at
-`krep-zk/tests/noir_hash.vectors.json`.
+The accumulators hash with Poseidon2 over BN254 — arithmetic in the proof
+system's own field, so a Merkle path costs tens of constraints per level rather
+than the thousands a bit-oriented hash would.
 
-Two constraints bind harder than "which hash is cheapest":
+The hard requirement was never cost, it was **agreement**. The verifier rebuilds
+the root in Rust; the circuit recomputes paths in Noir. One differing round
+constant and every proof fails. Poseidon2 is a family, not a function, so this
+uses Noir's own `bn254_blackbox_solver`, pinned to the same version as the
+installed nargo — the implementation the circuit will actually run, rather than
+a reimplementation whose parameters would have to be guessed. It is checked
+against output captured from the real compiler (`krep-zk/tests/`).
 
-- **Rust and Noir must agree exactly.** The verifier rebuilds the root in Rust;
-  the circuit recomputes paths in Noir. A single differing round constant makes
-  every proof fail. SHA-256 is interoperable by construction because it is
-  standardised — Poseidon2 is a *family*, and a Rust implementation is only
-  usable if it reproduces the vendored vectors.
-- **The value type changes with the hash.** Poseidon and Pedersen work on BN254
-  field elements, not bytes, and the field is 254 bits against a 256-bit
-  attestation id. Ids do not fit. Reducing modulo the field order is not
-  injective — about four fifths of the id space wraps — so ids must split into
-  two 128-bit limbs, which changes leaf and node types throughout the
-  accumulator.
+Worth recording about this toolchain version: `std::hash` exposes
+`poseidon2_permutation` and `pedersen_hash` only. Poseidon v1 and **sha256 are
+not in the stdlib** — both moved to external libraries.
 
-So the swap is a change to the accumulator's shape, not just its hash. An
-earlier note in this repo claimed otherwise; that was wrong.
+**Bytes do not fit in the field.** BN254 scalars are 254 bits; an attestation id
+is 256. Reducing modulo the field order is not injective — roughly four fifths
+of the id space wraps — so every 32-byte value splits into two 128-bit limbs,
+which always fit and always round trip. Leaf and node types are field elements
+throughout; only chain values (ids, pubkeys, txids) stay bytes.
 
-**Still to build:** the circuit, and the decision above.
+Since the stdlib exposes only the permutation, the sponge is defined in
+`hash.rs` and **the circuit must mirror it**: capacity holds a domain tag,
+inputs are absorbed into the rate three at a time, the first state element is
+squeezed. Leaves and nodes carry different tags, so an internal node's preimage
+can never be presented as a leaf.
+
+**Still to build:** the circuit itself.
 
 ## Next
 

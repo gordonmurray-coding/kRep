@@ -14,21 +14,23 @@
 //! shape is fixed by the key space. Anyone rebuilding it from the same set of
 //! defaults gets the same root, and there is no ordering to disagree about.
 
-use crate::hash::{hash_leaf, hash_node, Digest32};
+use crate::hash::{hash_leaf, hash_node, zero, Digest32, Field};
 use std::collections::HashMap;
 
 /// Height in bits — one level per bit of the 32-byte key.
 pub const DEPTH: usize = 256;
 
 /// What occupies a slot. Absence is the interesting case.
-const EMPTY: Digest32 = [0u8; 32];
+fn empty() -> Field {
+    zero()
+}
 
 #[derive(Debug, Clone)]
 pub struct SparseMerkleTree {
     /// Occupied leaves, keyed by pseudonym.
-    entries: HashMap<Digest32, Digest32>,
+    entries: HashMap<Digest32, Field>,
     /// Hash of an empty subtree at each height; index 0 is an empty leaf.
-    empties: Vec<Digest32>,
+    empties: Vec<Field>,
 }
 
 /// A path proving what occupies (or does not occupy) one key's slot.
@@ -36,10 +38,10 @@ pub struct SparseMerkleTree {
 pub struct SmtProof {
     pub key: Digest32,
     /// Sibling at each level, from the leaf upward.
-    pub siblings: Vec<Digest32>,
+    pub siblings: Vec<Field>,
     /// The leaf value found there — `None` means the slot is empty, which is
     /// the whole point of this structure.
-    pub value: Option<Digest32>,
+    pub value: Option<Field>,
 }
 
 impl SmtProof {
@@ -59,7 +61,7 @@ impl SparseMerkleTree {
         // Precompute the hash of an empty subtree at every height, so the
         // 2^256 unoccupied slots cost nothing to represent.
         let mut empties = Vec::with_capacity(DEPTH + 1);
-        empties.push(EMPTY);
+        empties.push(empty());
         for level in 0..DEPTH {
             let below = empties[level];
             empties.push(hash_node(&below, &below));
@@ -105,7 +107,7 @@ impl SparseMerkleTree {
     /// Only keys sharing the prefix matter; if none do, the answer is the
     /// precomputed empty hash and the recursion stops immediately. That is what
     /// keeps a 256-deep tree tractable.
-    fn subtree(&self, level: usize, prefix: &[bool]) -> Digest32 {
+    fn subtree(&self, level: usize, prefix: &[bool]) -> Field {
         let members: Vec<&Digest32> = self
             .entries
             .keys()
@@ -124,7 +126,7 @@ impl SparseMerkleTree {
         hash_node(&self.subtree(level - 1, &left), &self.subtree(level - 1, &right))
     }
 
-    pub fn root(&self) -> Digest32 {
+    pub fn root(&self) -> Field {
         self.subtree(DEPTH, &[])
     }
 
@@ -147,11 +149,11 @@ impl SparseMerkleTree {
 
 /// Recompute the root from a proof. Works identically for presence and
 /// absence; the difference is only what sits at the leaf.
-pub fn verify(root: &Digest32, proof: &SmtProof) -> bool {
+pub fn verify(root: &Field, proof: &SmtProof) -> bool {
     if proof.siblings.len() != DEPTH {
         return false;
     }
-    let mut node = proof.value.unwrap_or(EMPTY);
+    let mut node = proof.value.unwrap_or_else(empty);
     for (level, sibling) in proof.siblings.iter().enumerate() {
         node = if SparseMerkleTree::bit(&proof.key, level) {
             hash_node(sibling, &node)
@@ -163,7 +165,7 @@ pub fn verify(root: &Digest32, proof: &SmtProof) -> bool {
 }
 
 /// Does this proof establish that `key` has *not* defaulted, against `root`?
-pub fn verify_absence(root: &Digest32, proof: &SmtProof) -> bool {
+pub fn verify_absence(root: &Field, proof: &SmtProof) -> bool {
     proof.proves_absence() && verify(root, proof)
 }
 
@@ -245,8 +247,8 @@ mod tests {
     fn keys_sharing_long_prefixes_stay_distinct() {
         // Adjacent keys exercise the deep part of the tree, where a sloppy
         // prefix comparison would collapse two slots into one.
-        let mut near_a = [0xffu8; 32];
-        let mut near_b = [0xffu8; 32];
+        let mut near_a: Digest32 = [0xffu8; 32];
+        let mut near_b: Digest32 = [0xffu8; 32];
         near_b[31] = 0xfe;
         let t = SparseMerkleTree::from_keys([near_a]);
         let root = t.root();

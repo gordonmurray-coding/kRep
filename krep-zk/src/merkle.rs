@@ -10,13 +10,13 @@
 //! who scan the same chain range must get the same root, or the accumulator is
 //! useless as a shared reference point.
 
-use crate::hash::{hash_leaf, hash_node, Digest32};
+use crate::hash::{hash_leaf, hash_node, Field};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleTree {
     /// Level 0 is the leaves; the last level holds the root alone.
-    levels: Vec<Vec<Digest32>>,
-    leaves: Vec<Digest32>,
+    levels: Vec<Vec<Field>>,
+    leaves: Vec<Field>,
 }
 
 /// A path from a leaf to the root.
@@ -24,20 +24,20 @@ pub struct MerkleTree {
 pub struct MerkleProof {
     pub leaf_index: usize,
     /// Sibling at each level, bottom-up.
-    pub siblings: Vec<Digest32>,
+    pub siblings: Vec<Field>,
 }
 
 impl MerkleTree {
     /// Build from raw values. Sorted and de-duplicated, so the root depends
     /// only on which values are present.
     pub fn build(values: impl IntoIterator<Item = Vec<u8>>) -> MerkleTree {
-        let mut leaves: Vec<Digest32> = values.into_iter().map(|v| hash_leaf(&v)).collect();
+        let mut leaves: Vec<Field> = values.into_iter().map(|v| hash_leaf(&v)).collect();
         leaves.sort_unstable();
         leaves.dedup();
         Self::from_sorted_leaves(leaves)
     }
 
-    fn from_sorted_leaves(leaves: Vec<Digest32>) -> MerkleTree {
+    fn from_sorted_leaves(leaves: Vec<Field>) -> MerkleTree {
         if leaves.is_empty() {
             return MerkleTree { levels: vec![vec![]], leaves };
         }
@@ -57,7 +57,7 @@ impl MerkleTree {
         MerkleTree { levels, leaves }
     }
 
-    pub fn root(&self) -> Option<Digest32> {
+    pub fn root(&self) -> Option<Field> {
         self.levels.last().and_then(|l| l.first()).copied()
     }
 
@@ -92,7 +92,7 @@ impl MerkleTree {
 
 /// Recompute a root from a value and its path. This is the half a circuit
 /// performs: it never sees the tree, only the leaf and the siblings.
-pub fn verify(root: &Digest32, value: &[u8], proof: &MerkleProof) -> bool {
+pub fn verify(root: &Field, value: &[u8], proof: &MerkleProof) -> bool {
     let mut node = hash_leaf(value);
     let mut index = proof.leaf_index;
     for sibling in &proof.siblings {
@@ -167,7 +167,7 @@ mod tests {
         let good = tree.prove(b"attestation-5").unwrap();
 
         let mut flipped = good.clone();
-        flipped.siblings[0][0] ^= 1;
+        flipped.siblings[0] += crate::hash::Field::from(1u128);
         assert!(!verify(&root, b"attestation-5", &flipped), "a corrupted sibling must fail");
 
         // Claiming a different position with the same siblings must also fail,

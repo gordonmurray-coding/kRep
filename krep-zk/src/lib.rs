@@ -42,6 +42,6 @@ pub mod merkle;
 pub mod scan;
 pub mod smt;
 
-pub use hash::Digest32;
+pub use hash::{Digest32, Field};
 pub use merkle::{MerkleProof, MerkleTree};
 pub use smt::{SparseMerkleTree, SmtProof};

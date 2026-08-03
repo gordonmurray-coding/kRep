@@ -11,4 +11,11 @@ krep-escrow = { path = "../krep-escrow" }
 hex = "0.4"
 thiserror = "1"
 sha2 = "0.10"
+
+# Noir's own BN254 blackbox solver, pinned to the same version as the installed
+# nargo. Poseidon2 is a blackbox function solved by the backend, so this is the
+# implementation the circuit will actually use — authoritative rather than a
+# reimplementation whose parameters have to be guessed at.
+bn254_blackbox_solver = "1.0.0-beta.26"
+acir_field = "1.0.0-beta.26"
 secp256k1 = { version = "0.29", features = ["rand"] }
