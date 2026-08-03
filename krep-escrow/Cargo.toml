@@ -19,3 +19,9 @@ secp256k1 = { version = "0.29", features = ["rand"] }
 
 [dev-dependencies]
 kaspa-txscript-errors = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+# Live testnet driver (tests/live_escrow.rs, gated on $KREP_TEST_RPC).
+kaspa-rpc-core = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+kaspa-grpc-client = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
+krep-core = { path = "../krep-core", features = ["kaspad"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+hex = "0.4"

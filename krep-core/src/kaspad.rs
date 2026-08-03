@@ -147,7 +147,7 @@ pub struct KaspadAnchorVerifier {
     rpc: Arc<dyn RpcApi>,
     handle: Handle,
     cfg: ScanConfig,
-    /// txid -> resolution. `None` means "scanned for and genuinely absent".
+    /// txid -> resolution. Positive results only; see `resolve_async`.
     resolved: Mutex<HashMap<RpcHash, Option<AcceptedTx>>>,
     /// Outcome of the most recent chain scan, for accurate diagnostics.
     last_scan: Mutex<Option<ScanOutcome>>,
@@ -209,20 +209,18 @@ impl KaspadAnchorVerifier {
         *self.last_scan.lock().unwrap() = Some(outcome);
         let mut cache = self.resolved.lock().unwrap();
         for txid in missing {
-            match found.get(&txid) {
-                Some(tx) => {
-                    cache.insert(txid, Some(tx.clone()));
-                }
-                // Only remember an absence if the scan actually ran out of
-                // chain rather than out of budget. Caching "not found" after a
-                // truncated scan would turn a temporary blind spot into a
-                // permanent verdict.
-                None if outcome.reached_tip => {
-                    cache.insert(txid, None);
-                }
-                None => {}
+            // Only positive results are cached. "This transaction is accepted,
+            // with this payload" is a permanent fact about the chain; "this
+            // transaction does not exist" is merely true as of one moment, and
+            // the chain grows continuously. Caching an absence made a verifier
+            // that asked a moment too early keep answering from that stale
+            // miss forever — which is exactly what happened the first time an
+            // escrow was verified seconds after being slashed.
+            if let Some(tx) = found.get(&txid) {
+                cache.insert(txid, Some(tx.clone()));
             }
         }
+        let _ = outcome;
         Ok(())
     }
 

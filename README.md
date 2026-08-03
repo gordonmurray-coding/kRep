@@ -195,11 +195,49 @@ Anchors are network-scoped in practice: a mainnet outpoint queried against
 testnet-10 comes back *unresolvable*, not "unanchored" — the verifier will not
 claim a negative about a transaction that may exist on a chain it cannot see.
 
+## M2 — escrow covenant
+
+`krep-escrow` implements the SPEC 2.3 state machine as a native Kaspa covenant
+(Toccata, KIP-16/17/20/21 — live on mainnet since DAA 474,165,565). Immutable
+terms are baked into the script, so the escrow address commits to them; mutable
+state lives in the transaction payload at fixed offsets.
+
+Every branch — claim, ship, settle, auto-release, dispute, arbiter resolution,
+slash, refund — is exercised against the real script VM, and all of them share
+one address via a branch selector. Dispute paths are omitted entirely when no
+arbiter is configured, rather than present-but-unresolvable.
+
+### The unilateral default, driven on testnet-10
+
+SPEC 1.5 flags "0 defaults" as an open problem: a defaulter will not co-sign
+their own default. A covenant cannot produce a signature either — but it can
+force bytes into the payload of the transaction that takes the bond. So a
+covenant-witnessed attestation carries **no signatures at all**, and its
+authority is the on-chain fact that the slash branch executed.
+
+Run end to end on testnet-10:
+
+| | |
+|---|---|
+| escrow | `kaspatest:pqgfeunqcau7xwcdxwd27kq6k3rre48fn3lrt0nhwc3vmajdwy4uxffen5qvg` |
+| OPEN → CLAIM | `6e72a44178fdd4ada471da91479d9661eda6c4ac84fd0f854b2944a6a16f4415` |
+| SLASH | `95e133823b340ad5347e777a075d55c3f931649e11bb01bc87c5da2e455e3ca0` |
+| result | the maker carries a `Default` they never signed, verified from the chain alone |
+
+The witness names the redeem script, the branch taken, and the offset at which
+the covenant recorded *who* defaulted. That last field is load-bearing: without
+it anyone able to drive a covenant of their own could mint defaults against
+strangers. The live test asserts the same witness cannot be re-pointed at
+another pseudonym.
+
+A covenant witness may never carry a `Success` — otherwise driving your own
+covenant would be a way to mint praise. It is only ever an answer to "the
+subject would refuse to sign this".
+
 ## Next
 
-1. Escrow covenant (M2), including the unilateral-default path — `Default`
-   attestations deliberately have no co-signed mirror, since "the owner
-   defaulted" has no honest role-flipped form.
+1. M3 — Nostr job board client, and M4, the dogfood run: one real end-to-end
+   job through a physical printer.
 
 ## Deliberate design points (don't "fix" these)
 
