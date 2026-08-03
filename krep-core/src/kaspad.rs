@@ -118,14 +118,18 @@ impl Default for ScanConfig {
 struct AcceptedTx {
     payload: Vec<u8>,
     output_count: usize,
+    /// Serialized script public keys, needed to prove an outpoint was locked by
+    /// a particular covenant.
+    output_spks: Vec<Vec<u8>>,
     /// Chain block that accepted it — the earliest point a spender can appear.
     accepting_block: RpcHash,
 }
 
 /// Result of hunting for the transaction that spends an anchor outpoint.
 enum Spend {
-    /// Found, accepted, and here is its payload.
-    Settled { payload: Vec<u8> },
+    /// Found, accepted, and here are its payload and the signature script that
+    /// unlocked the anchor outpoint.
+    Settled { payload: Vec<u8>, signature_script: Vec<u8> },
     /// Scanned all the way to the tip; nothing ever spent this outpoint.
     Unspent,
     /// Ran out of block budget. Not a verdict.
@@ -319,6 +323,7 @@ impl KaspadAnchorVerifier {
                 return Ok(Some(AcceptedTx {
                     payload: tx.payload.clone(),
                     output_count: tx.outputs.len(),
+                    output_spks: tx.outputs.iter().map(spk_bytes).collect(),
                     accepting_block: accepting,
                 }));
             }
@@ -387,7 +392,16 @@ impl KaspadAnchorVerifier {
                     // accepted — of two conflicting spends only one can be, so
                     // acceptance is what decides which spend is real.
                     if let Some(accepted) = self.lookup_async(txid, Some(from)).await? {
-                        return Ok(Spend::Settled { payload: accepted.payload });
+                        let signature_script = tx
+                            .inputs
+                            .iter()
+                            .find(|i| {
+                                i.previous_outpoint.transaction_id == escrow_txid
+                                    && i.previous_outpoint.index == anchor.index
+                            })
+                            .map(|i| i.signature_script.clone())
+                            .unwrap_or_default();
+                        return Ok(Spend::Settled { payload: accepted.payload, signature_script });
                     }
                 }
             }
@@ -415,6 +429,15 @@ pub fn payload_commits(payload: &[u8], id: &[u8; 32]) -> bool {
 }
 
 impl AnchorVerifier for KaspadAnchorVerifier {
+    fn covenant_witnessed(
+        &self,
+        anchor: &Outpoint,
+        witness: &crate::CovenantWitness,
+        owner: &secp256k1::XOnlyPublicKey,
+    ) -> io::Result<bool> {
+        self.check_covenant(anchor, witness, owner)
+    }
+
     fn is_anchored(&self, id: &[u8; 32], anchor: &Outpoint) -> io::Result<bool> {
         let escrow_txid = RpcHash::from_bytes(anchor.txid);
 
@@ -439,7 +462,7 @@ impl AnchorVerifier for KaspadAnchorVerifier {
 
         // Phase 2: find the settlement that spent it.
         match self.handle.block_on(self.find_spender(anchor, escrow.accepting_block))? {
-            Spend::Settled { payload } => Ok(payload_commits(&payload, id)),
+            Spend::Settled { payload, .. } => Ok(payload_commits(&payload, id)),
             // Genuinely never spent: the escrow was never settled, so there is
             // no settlement transaction and nothing anchors this attestation.
             Spend::Unspent => Ok(false),
@@ -454,6 +477,75 @@ impl AnchorVerifier for KaspadAnchorVerifier {
 }
 
 impl KaspadAnchorVerifier {
+    /// Establish that a covenant, rather than a signature, authorized an
+    /// attestation. See [`AnchorVerifier::covenant_witnessed`].
+    fn check_covenant(
+        &self,
+        anchor: &Outpoint,
+        witness: &crate::CovenantWitness,
+        owner: &secp256k1::XOnlyPublicKey,
+    ) -> io::Result<bool> {
+        let escrow_txid = RpcHash::from_bytes(anchor.txid);
+        let Some(escrow) = self.lookup(escrow_txid, None)? else {
+            return Err(io::Error::other(format!(
+                "covenant witness names outpoint {escrow_txid}:{} which could not be resolved: {}",
+                anchor.index,
+                self.scan_diagnostic()
+            )));
+        };
+
+        // 1. The outpoint really was locked by this covenant.
+        let expected = kaspa_txscript::pay_to_script_hash_script(&witness.redeem_script);
+        let expected_bytes: Vec<u8> = expected
+            .version()
+            .to_be_bytes()
+            .iter()
+            .copied()
+            .chain(expected.script().iter().copied())
+            .collect();
+        let Some(actual) = escrow.output_spks.get(anchor.index as usize) else {
+            return Ok(false);
+        };
+        if *actual != expected_bytes {
+            return Ok(false);
+        }
+
+        // 2. The covenant itself recorded this owner. Without this an attacker
+        //    who can drive any covenant of their own could mint defaults
+        //    against anybody they liked.
+        let at = witness.owner_offset as usize;
+        match escrow.payload.get(at..at + 32) {
+            Some(bytes) if bytes == owner.serialize() => {}
+            _ => return Ok(false),
+        }
+
+        // 3. Spending it really took the declared branch.
+        let spend = self.handle.block_on(self.find_spender(anchor, escrow.accepting_block))?;
+        let Spend::Settled { signature_script, .. } = spend else {
+            return Ok(false);
+        };
+        let Some(items) = parse_pushes(&signature_script) else { return Ok(false) };
+        // The redeem script is the last push; the selector sits just below it.
+        let n = items.len();
+        if n < 2 {
+            return Ok(false);
+        }
+        if items[n - 1] != PushItem::Data(witness.redeem_script.clone()) {
+            return Ok(false);
+        }
+        let selector = witness.branch as i64;
+        let chosen = match &items[n - 2] {
+            PushItem::Small(v) => *v,
+            PushItem::Data(d) if d.len() <= 8 => {
+                let mut buf = [0u8; 8];
+                buf[..d.len()].copy_from_slice(d);
+                i64::from_le_bytes(buf)
+            }
+            PushItem::Data(_) => return Ok(false),
+        };
+        Ok(chosen == selector)
+    }
+
     fn scan_diagnostic(&self) -> String {
         let from = self
             .cfg
@@ -476,6 +568,78 @@ impl KaspadAnchorVerifier {
             None => format!("no scan was performed from {from}"),
         }
     }
+}
+
+/// Serialized script public key, matching what the script engine sees:
+/// the u16 version big-endian, then the script.
+fn spk_bytes(output: &kaspa_rpc_core::RpcTransactionOutput) -> Vec<u8> {
+    let spk = &output.script_public_key;
+    spk.version().to_be_bytes().iter().copied().chain(spk.script().iter().copied()).collect()
+}
+
+/// One item pushed by a signature script.
+#[derive(Debug, PartialEq, Eq)]
+enum PushItem {
+    Data(Vec<u8>),
+    /// Small integers are encoded as opcodes rather than data pushes, so a
+    /// branch selector below 17 never appears as bytes on the wire.
+    Small(i64),
+}
+
+/// Walk a signature script and recover what it pushed.
+///
+/// Only the push forms are recognised — a signature script that contains
+/// anything else is not one we can reason about, and the parse fails rather
+/// than guessing.
+fn parse_pushes(script: &[u8]) -> Option<Vec<PushItem>> {
+    const OP_0: u8 = 0x00;
+    const OP_PUSHDATA1: u8 = 0x4c;
+    const OP_PUSHDATA2: u8 = 0x4d;
+    const OP_PUSHDATA4: u8 = 0x4e;
+    const OP_1NEGATE: u8 = 0x4f;
+    const OP_1: u8 = 0x51;
+    const OP_16: u8 = 0x60;
+
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < script.len() {
+        let op = script[i];
+        i += 1;
+        let len = match op {
+            OP_0 => {
+                out.push(PushItem::Small(0));
+                continue;
+            }
+            OP_1NEGATE => {
+                out.push(PushItem::Small(-1));
+                continue;
+            }
+            OP_1..=OP_16 => {
+                out.push(PushItem::Small((op - OP_1 + 1) as i64));
+                continue;
+            }
+            1..=0x4b => op as usize,
+            OP_PUSHDATA1 => {
+                let n = *script.get(i)? as usize;
+                i += 1;
+                n
+            }
+            OP_PUSHDATA2 => {
+                let n = u16::from_le_bytes(script.get(i..i + 2)?.try_into().ok()?) as usize;
+                i += 2;
+                n
+            }
+            OP_PUSHDATA4 => {
+                let n = u32::from_le_bytes(script.get(i..i + 4)?.try_into().ok()?) as usize;
+                i += 4;
+                n
+            }
+            _ => return None,
+        };
+        out.push(PushItem::Data(script.get(i..i + len)?.to_vec()));
+        i += len;
+    }
+    Some(out)
 }
 
 fn rpc_err(call: &'static str) -> impl Fn(kaspa_rpc_core::RpcError) -> io::Error {

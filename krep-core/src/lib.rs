@@ -22,6 +22,10 @@ use thiserror::Error;
 pub const SIGN_DOMAIN: &str = "krep/attest/v1/sign";
 /// Domain tag for attestation ids (the value committed on-chain).
 pub const ID_DOMAIN: &str = "krep/attest/v1/id";
+/// Domain tag for ids of covenant-witnessed attestations. Deliberately distinct
+/// from [`ID_DOMAIN`] so a co-signed attestation and a covenant-witnessed one
+/// can never collide, and so existing v1 chains keep verifying unchanged.
+pub const COVENANT_ID_DOMAIN: &str = "krep/attest/v2/covenant-id";
 /// Domain tag for context key derivation.
 pub const CTX_DOMAIN: &str = "krep/ctx/v1";
 
@@ -159,6 +163,17 @@ pub(crate) mod xonly {
     }
 }
 
+mod hex_vec {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(v))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        let s = String::deserialize(d)?;
+        hex::decode(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 mod schnorr_sig {
     use secp256k1::schnorr::Signature;
     use serde::{Deserialize, Deserializer, Serializer};
@@ -240,38 +255,157 @@ impl AttestationBody {
     }
 }
 
-/// A fully co-signed attestation.
+/// Proof that a covenant authorized an attestation nobody signed.
+///
+/// A defaulter will not co-sign their own default — and will not sign it as
+/// *owner* either, so a covenant-witnessed attestation carries no signatures at
+/// all. Its authority is the on-chain fact that a specific branch of a specific
+/// covenant executed. This is SPEC 1.5's "the covenant is the second signer of
+/// record", made checkable.
+///
+/// Deliberately protocol-agnostic: kRep does not know what a FabMesh escrow is.
+/// It checks only that the anchored outpoint was locked by `redeem_script`, that
+/// spending it took branch `branch`, and that the escrow state named this
+/// attestation's owner. Deciding whether `redeem_script` is a covenant worth
+/// trusting is the relying party's job — that is what SPEC 2.1's
+/// `escrow_template` hash is for.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CovenantWitness {
+    /// The redeem script the anchor outpoint was locked by (P2SH preimage).
+    #[serde(with = "hex_vec")]
+    pub redeem_script: Vec<u8>,
+    /// Branch selector the spending transaction chose.
+    pub branch: u8,
+    /// Byte offset, within the *anchored* transaction's payload, at which the
+    /// covenant records the pubkey this attestation is about. Without this an
+    /// attacker who controls any slash could mint defaults against strangers.
+    pub owner_offset: u16,
+}
+
+impl CovenantWitness {
+    pub fn canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.redeem_script.len() + 11);
+        out.extend_from_slice(&(self.redeem_script.len() as u64).to_le_bytes());
+        out.extend_from_slice(&self.redeem_script);
+        out.push(self.branch);
+        out.extend_from_slice(&self.owner_offset.to_le_bytes());
+        out
+    }
+}
+
+/// What authorizes an attestation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Authorization {
+    /// Both parties signed. The ordinary case.
+    CoSigned {
+        #[serde(with = "schnorr_sig")]
+        sig_owner: Signature,
+        #[serde(with = "schnorr_sig")]
+        sig_counterparty: Signature,
+    },
+    /// Nobody signed; a covenant executed. Only ever legitimate for outcomes
+    /// the subject would refuse to sign.
+    Covenant { covenant_witness: CovenantWitness },
+}
+
+/// A fully authorized attestation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Attestation {
     #[serde(flatten)]
     pub body: AttestationBody,
-    #[serde(with = "schnorr_sig")]
-    pub sig_owner: Signature,
-    #[serde(with = "schnorr_sig")]
-    pub sig_counterparty: Signature,
+    #[serde(flatten)]
+    pub auth: Authorization,
 }
 
 impl Attestation {
-    /// The 32-byte value committed in the settlement tx payload.
-    /// Includes both signatures, so anchoring proves the co-signed object existed.
-    pub fn id(&self) -> [u8; 32] {
-        let mut h = blake3::Hasher::new_derive_key(ID_DOMAIN);
-        h.update(&self.body.canonical_bytes());
-        h.update(self.sig_owner.as_ref());
-        h.update(self.sig_counterparty.as_ref());
-        *h.finalize().as_bytes()
+    /// Convenience constructor for the ordinary co-signed case.
+    pub fn co_signed(body: AttestationBody, sig_owner: Signature, sig_counterparty: Signature) -> Self {
+        Attestation { body, auth: Authorization::CoSigned { sig_owner, sig_counterparty } }
     }
 
-    /// Field sanity + both schnorr signatures.
+    pub fn sig_owner(&self) -> Option<&Signature> {
+        match &self.auth {
+            Authorization::CoSigned { sig_owner, .. } => Some(sig_owner),
+            _ => None,
+        }
+    }
+
+    pub fn sig_counterparty(&self) -> Option<&Signature> {
+        match &self.auth {
+            Authorization::CoSigned { sig_counterparty, .. } => Some(sig_counterparty),
+            _ => None,
+        }
+    }
+
+    pub fn covenant_witness(&self) -> Option<&CovenantWitness> {
+        match &self.auth {
+            Authorization::Covenant { covenant_witness } => Some(covenant_witness),
+            _ => None,
+        }
+    }
+
+    /// The 32-byte value committed in the settlement tx payload.
+    ///
+    /// Co-signed ids are computed exactly as before, so chains anchored under
+    /// v1 keep verifying. Covenant-witnessed ids use a separate domain, so the
+    /// two forms cannot be confused for one another.
+    pub fn id(&self) -> [u8; 32] {
+        match &self.auth {
+            Authorization::CoSigned { sig_owner, sig_counterparty } => {
+                let mut h = blake3::Hasher::new_derive_key(ID_DOMAIN);
+                h.update(&self.body.canonical_bytes());
+                h.update(sig_owner.as_ref());
+                h.update(sig_counterparty.as_ref());
+                *h.finalize().as_bytes()
+            }
+            Authorization::Covenant { covenant_witness } => {
+                let mut h = blake3::Hasher::new_derive_key(COVENANT_ID_DOMAIN);
+                h.update(&self.body.canonical_bytes());
+                h.update(&covenant_witness.canonical_bytes());
+                *h.finalize().as_bytes()
+            }
+        }
+    }
+
+    /// Field sanity, plus whatever can be checked without a node.
+    ///
+    /// For a covenant-witnessed attestation that is *only* field sanity: its
+    /// authority lives on-chain, so it is meaningless until
+    /// [`chain::Chain::verify_anchored`] has checked it against a node. Offline
+    /// verification deliberately does not pretend otherwise.
     pub fn verify(&self) -> Result<()> {
         self.body.validate_fields()?;
-        let secp = Secp256k1::verification_only();
-        let msg = Message::from_digest(self.body.signing_digest());
-        secp.verify_schnorr(&self.sig_owner, &msg, &self.body.owner)
-            .map_err(|e| KrepError::BadSignature(format!("owner: {e}")))?;
-        secp.verify_schnorr(&self.sig_counterparty, &msg, &self.body.counterparty)
-            .map_err(|e| KrepError::BadSignature(format!("counterparty: {e}")))?;
-        Ok(())
+        match &self.auth {
+            Authorization::CoSigned { sig_owner, sig_counterparty } => {
+                let secp = Secp256k1::verification_only();
+                let msg = Message::from_digest(self.body.signing_digest());
+                secp.verify_schnorr(sig_owner, &msg, &self.body.owner)
+                    .map_err(|e| KrepError::BadSignature(format!("owner: {e}")))?;
+                secp.verify_schnorr(sig_counterparty, &msg, &self.body.counterparty)
+                    .map_err(|e| KrepError::BadSignature(format!("counterparty: {e}")))?;
+                Ok(())
+            }
+            Authorization::Covenant { covenant_witness } => {
+                if covenant_witness.redeem_script.is_empty() {
+                    return Err(KrepError::BadField("covenant witness has no redeem script".into()));
+                }
+                // A covenant witness is only ever an answer to "the subject
+                // would not sign this". Allowing it for a Success would let
+                // anyone who can drive a covenant mint praise for themselves.
+                if self.body.outcome == Outcome::Success {
+                    return Err(KrepError::BadField(
+                        "a Success attestation must be co-signed, not covenant-witnessed".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Does this attestation need a node before it means anything?
+    pub fn needs_chain_proof(&self) -> bool {
+        matches!(self.auth, Authorization::Covenant { .. })
     }
 }
 
@@ -309,11 +443,7 @@ pub fn countersign(counterparty: &Keypair, partial: PartialAttestation) -> Resul
         return Err(KrepError::BadField("signing key is not body.counterparty".into()));
     }
     let sig_counterparty = sign_body(counterparty, &partial.body);
-    let att = Attestation {
-        body: partial.body,
-        sig_owner: partial.sig_owner,
-        sig_counterparty,
-    };
+    let att = Attestation::co_signed(partial.body, partial.sig_owner, sig_counterparty);
     att.verify()?;
     Ok(att)
 }
@@ -353,6 +483,23 @@ pub fn derive_context_keypair(seed: &[u8; 32], context: &str) -> Keypair {
 /// node outage read as a fraudulent chain.
 pub trait AnchorVerifier {
     fn is_anchored(&self, id: &[u8; 32], anchor: &Outpoint) -> std::io::Result<bool>;
+
+    /// Check the three things a covenant witness claims, none of which can be
+    /// checked offline:
+    ///
+    /// 1. the anchor outpoint really was locked by `witness.redeem_script`,
+    /// 2. the transaction that spent it really took branch `witness.branch`,
+    /// 3. the escrow state really named `owner` at `witness.owner_offset`.
+    ///
+    /// (3) is what stops an attacker who can drive *any* covenant from minting
+    /// defaults against strangers: the pubkey being defamed has to be the one
+    /// the covenant itself recorded.
+    fn covenant_witnessed(
+        &self,
+        anchor: &Outpoint,
+        witness: &CovenantWitness,
+        owner: &XOnlyPublicKey,
+    ) -> std::io::Result<bool>;
 }
 
 /// Accepts everything. For tests and offline chain-structure checks ONLY.
@@ -360,6 +507,14 @@ pub struct TrustEverythingAnchor;
 
 impl AnchorVerifier for TrustEverythingAnchor {
     fn is_anchored(&self, _id: &[u8; 32], _anchor: &Outpoint) -> std::io::Result<bool> {
+        Ok(true)
+    }
+    fn covenant_witnessed(
+        &self,
+        _anchor: &Outpoint,
+        _witness: &CovenantWitness,
+        _owner: &XOnlyPublicKey,
+    ) -> std::io::Result<bool> {
         Ok(true)
     }
 }

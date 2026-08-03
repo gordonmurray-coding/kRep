@@ -243,11 +243,11 @@ fn owner_cannot_resign_a_rewrite_without_the_counterparty() {
     let mut forged_body = a0.body.clone();
     forged_body.outcome = Outcome::Default;
     let resigned = create_partial(&owner, forged_body.clone()).unwrap();
-    let forged = Attestation {
-        body: forged_body,
-        sig_owner: resigned.sig_owner,
-        sig_counterparty: a0.sig_counterparty, // stale — signed the old body
-    };
+    let forged = Attestation::co_signed(
+        forged_body,
+        resigned.sig_owner,
+        *a0.sig_counterparty().unwrap(), // stale — signed the old body
+    );
 
     let err = forged.verify().unwrap_err();
     assert!(
@@ -264,8 +264,12 @@ fn attestation_id_binds_both_signatures() {
     let id_before = a.id();
 
     let mut mutated = a.clone();
-    mutated.sig_counterparty = cosign(&owner, &cp, body(&owner, &cp, 0, None, 1_700_000_999))
-        .sig_counterparty;
+    mutated.auth = krep_core::Authorization::CoSigned {
+        sig_owner: *a.sig_owner().unwrap(),
+        sig_counterparty: *cosign(&owner, &cp, body(&owner, &cp, 0, None, 1_700_000_999))
+            .sig_counterparty()
+            .unwrap(),
+    };
     assert_ne!(id_before, mutated.id(), "id must commit to the signatures");
 }
 
@@ -311,13 +315,11 @@ fn signature_from_wrong_key_is_rejected() {
 
     let good = cosign(&owner, &cp, b.clone());
 
-    let forged_owner_sig =
-        Attestation { body: b.clone(), sig_owner: rogue, sig_counterparty: good.sig_counterparty };
+    let forged_owner_sig = Attestation::co_signed(b.clone(), rogue, *good.sig_counterparty().unwrap());
     let err = forged_owner_sig.verify().unwrap_err();
     assert!(matches!(&err, KrepError::BadSignature(m) if m.contains("owner")), "got {err:?}");
 
-    let forged_cp_sig =
-        Attestation { body: b, sig_owner: good.sig_owner, sig_counterparty: rogue };
+    let forged_cp_sig = Attestation::co_signed(b, *good.sig_owner().unwrap(), rogue);
     let err = forged_cp_sig.verify().unwrap_err();
     assert!(matches!(&err, KrepError::BadSignature(m) if m.contains("counterparty")), "got {err:?}");
 }
@@ -328,11 +330,8 @@ fn swapped_signatures_are_rejected() {
     let cp = kp("cp0");
     let a = cosign(&owner, &cp, body(&owner, &cp, 0, None, 1_700_000_000));
 
-    let swapped = Attestation {
-        body: a.body.clone(),
-        sig_owner: a.sig_counterparty,
-        sig_counterparty: a.sig_owner,
-    };
+    let swapped =
+        Attestation::co_signed(a.body.clone(), *a.sig_counterparty().unwrap(), *a.sig_owner().unwrap());
     assert!(swapped.verify().is_err(), "signatures must not be interchangeable");
 }
 
@@ -369,6 +368,14 @@ fn field_validation_rejects_malformed_bodies() {
 struct RejectAllAnchor;
 impl AnchorVerifier for RejectAllAnchor {
     fn is_anchored(&self, _id: &[u8; 32], _anchor: &Outpoint) -> std::io::Result<bool> {
+        Ok(false)
+    }
+    fn covenant_witnessed(
+        &self,
+        _anchor: &Outpoint,
+        _witness: &krep_core::CovenantWitness,
+        _owner: &secp256k1::XOnlyPublicKey,
+    ) -> std::io::Result<bool> {
         Ok(false)
     }
 }
@@ -461,4 +468,136 @@ fn scoring_counts_outcomes_and_diversity() {
         "a 2-key ring must show low diversity"
     );
     assert_eq!(s.volume_hist, [0, 3, 0, 0]);
+}
+
+// ---------------------------------------------------------------------------
+// covenant-witnessed attestations (M2 unilateral default path)
+// ---------------------------------------------------------------------------
+
+use krep_core::{Authorization, CovenantWitness};
+
+fn witness() -> CovenantWitness {
+    CovenantWitness { redeem_script: vec![0x51, 0x52, 0x53], branch: 7, owner_offset: 38 }
+}
+
+fn covenant_att(owner: &Keypair, cp: &Keypair, outcome: Outcome) -> Attestation {
+    let mut b = body(owner, cp, 0, None, 1_700_000_000);
+    b.outcome = outcome;
+    Attestation { body: b, auth: Authorization::Covenant { covenant_witness: witness() } }
+}
+
+#[test]
+fn a_defaulter_signs_nothing_at_all() {
+    let owner = kp("defaulter");
+    let cp = kp("buyer");
+    let att = covenant_att(&owner, &cp, Outcome::Default);
+
+    // The whole point: no signature from either side. A defaulter will not sign
+    // their own default as counterparty *or* as owner.
+    assert!(att.sig_owner().is_none());
+    assert!(att.sig_counterparty().is_none());
+    assert!(att.covenant_witness().is_some());
+    assert!(att.needs_chain_proof(), "its authority is on-chain, not in the object");
+
+    // Field sanity passes offline, but that is all offline can establish.
+    att.verify().expect("a covenant-witnessed default is structurally valid");
+}
+
+#[test]
+fn covenant_witnesses_cannot_manufacture_praise() {
+    let owner = kp("liar");
+    let cp = kp("victim");
+    // Success must be co-signed. If a covenant could witness one, anyone able
+    // to drive a covenant of their own could mint reputation for themselves.
+    let err = covenant_att(&owner, &cp, Outcome::Success).verify().unwrap_err();
+    assert!(matches!(&err, KrepError::BadField(m) if m.contains("co-signed")), "got {err:?}");
+
+    // Outcomes the subject would refuse to sign are exactly what it is for.
+    covenant_att(&owner, &cp, Outcome::Default).verify().unwrap();
+    covenant_att(&owner, &cp, Outcome::DisputedResolved).verify().unwrap();
+}
+
+#[test]
+fn covenant_ids_cannot_collide_with_co_signed_ids() {
+    let owner = kp("owner");
+    let cp = kp("cp0");
+    let b = body(&owner, &cp, 0, None, 1_700_000_000);
+
+    let signed = cosign(&owner, &cp, b.clone());
+    let witnessed = Attestation { body: b, auth: Authorization::Covenant { covenant_witness: witness() } };
+
+    // Separate domain tags, so the two forms are computationally distinct even
+    // over an identical body.
+    assert_ne!(signed.id(), witnessed.id());
+
+    // And the witness binds into the id: changing which covenant, which branch
+    // or where the owner was recorded all yield a different attestation.
+    for mutate in [
+        |w: &mut CovenantWitness| w.branch = 8,
+        |w: &mut CovenantWitness| w.owner_offset = 6,
+        |w: &mut CovenantWitness| w.redeem_script.push(0x99),
+    ] {
+        let mut m = witness();
+        mutate(&mut m);
+        let other =
+            Attestation { body: witnessed.body.clone(), auth: Authorization::Covenant { covenant_witness: m } };
+        assert_ne!(witnessed.id(), other.id(), "witness fields must bind into the id");
+    }
+}
+
+#[test]
+fn an_unproven_covenant_witness_never_scores() {
+    let owner = kp("defaulter");
+    let cp = kp("buyer");
+    let att = covenant_att(&owner, &cp, Outcome::Default);
+    let mut chain = Chain::new(xonly(&owner));
+    chain.append(att).unwrap();
+
+    // Anchored is not enough for a covenant witness: the covenant's authority
+    // has to be established separately, or committing arbitrary bytes to a
+    // payload would be enough to defame anyone.
+    struct AnchoredButUnwitnessed;
+    impl AnchorVerifier for AnchoredButUnwitnessed {
+        fn is_anchored(&self, _id: &[u8; 32], _a: &Outpoint) -> std::io::Result<bool> {
+            Ok(true)
+        }
+        fn covenant_witnessed(
+            &self,
+            _a: &Outpoint,
+            _w: &CovenantWitness,
+            _o: &XOnlyPublicKey,
+        ) -> std::io::Result<bool> {
+            Ok(false)
+        }
+    }
+    let err = chain.verify_anchored(&AnchoredButUnwitnessed).unwrap_err();
+    assert!(
+        matches!(&err, KrepError::Chain { index: 0, reason } if reason.contains("covenant witness")),
+        "got {err:?}"
+    );
+
+    // With the covenant established, it stands.
+    chain.verify_anchored(&krep_core::TrustEverythingAnchor).unwrap();
+}
+
+#[test]
+fn json_round_trips_and_v1_chains_still_parse() {
+    let owner = kp("owner");
+    let cp = kp("cp0");
+
+    // Covenant-witnessed round trip.
+    let witnessed = covenant_att(&owner, &cp, Outcome::Default);
+    let back: Attestation = serde_json::from_str(&serde_json::to_string(&witnessed).unwrap()).unwrap();
+    assert_eq!(back.id(), witnessed.id());
+    assert_eq!(back.covenant_witness(), witnessed.covenant_witness());
+
+    // Co-signed round trip, and the JSON still uses the original field names —
+    // chains anchored before this change must keep verifying.
+    let signed = cosign(&owner, &cp, body(&owner, &cp, 0, None, 1_700_000_000));
+    let json = serde_json::to_string(&signed).unwrap();
+    assert!(json.contains("sig_owner") && json.contains("sig_counterparty"));
+    assert!(!json.contains("covenant_witness"));
+    let back: Attestation = serde_json::from_str(&json).unwrap();
+    assert_eq!(back.id(), signed.id(), "v1 attestation ids must be unchanged");
+    back.verify().unwrap();
 }

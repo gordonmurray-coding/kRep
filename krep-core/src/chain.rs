@@ -80,14 +80,28 @@ impl Chain {
     pub fn verify_anchored<A: AnchorVerifier>(&self, anchor: &A) -> Result<()> {
         self.verify()?;
         for (i, att) in self.attestations.iter().enumerate() {
+            let idx = i as u64;
             let ok = anchor
                 .is_anchored(&att.id(), &att.body.anchor)
-                .map_err(|e| KrepError::Chain { index: i as u64, reason: format!("anchor query failed: {e}") })?;
+                .map_err(|e| KrepError::Chain { index: idx, reason: format!("anchor query failed: {e}") })?;
             if !ok {
-                return Err(KrepError::Chain {
-                    index: i as u64,
-                    reason: "attestation not anchored on-chain".into(),
-                });
+                return Err(KrepError::Chain { index: idx, reason: "attestation not anchored on-chain".into() });
+            }
+
+            // A covenant-witnessed attestation carries no signatures at all, so
+            // being anchored is not enough — the covenant's authority has to be
+            // established too, or anyone could commit arbitrary bytes to a
+            // payload and call it a default.
+            if let Some(witness) = att.covenant_witness() {
+                let authorized = anchor
+                    .covenant_witnessed(&att.body.anchor, witness, &att.body.owner)
+                    .map_err(|e| KrepError::Chain { index: idx, reason: format!("covenant query failed: {e}") })?;
+                if !authorized {
+                    return Err(KrepError::Chain {
+                        index: idx,
+                        reason: "covenant witness does not authorize this attestation".into(),
+                    });
+                }
             }
         }
         Ok(())
