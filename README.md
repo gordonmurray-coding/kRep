@@ -490,11 +490,55 @@ trading with itself manufactures real cost but not independent endorsement.
 And **covenant-witnessed entries** are marked `unsigned`: defaults nobody
 signed, which the subject could not refuse or omit.
 
+## M6 — selective disclosure (accumulators built, circuit pending)
+
+SPEC 1.5 wants to prove *"this fresh key controls a chain with ≥N successes and
+0 defaults"* without revealing which chain, against "a global Merkle root of all
+anchored attestations (maintained by anyone — it's reproducible from chain
+data)".
+
+**That root is not reproducible as described.** Kaspa carries the 32-byte
+attestation *id*; the body — outcome, role, owner — never goes on chain, which
+is the `amount_bucket`-not-amounts privacy decision working as intended. A third
+party can rebuild the set of anchored ids and nothing else, so a root over
+attestation *contents* cannot be rebuilt by the person checking the proof.
+
+The statement therefore splits across two accumulators, both genuinely
+rebuildable from chain data:
+
+| accumulator | leaf | proves |
+|---|---|---|
+| anchored ids (`merkle`) | `(spent outpoint, 32-byte payload window)` | membership — this success really was anchored |
+| defaulted pseudonyms (`smt`) | pseudonym the covenant recorded on a slash | **non**-membership — you are not among them |
+
+### Why the second one is needed
+
+"≥N successes" needs only membership. "0 defaults" needs to prove an *absence*,
+and a chain alone cannot: omitting an entry mid-chain breaks the `prev` links
+and is caught, but truncating after the last success is invisible. Scanning for
+slashes against a pseudonym would settle it — and would reveal the pseudonym,
+destroying the unlinkability the proof exists for. A sparse Merkle tree answers
+the same question without naming anyone.
+
+M2 is what made this buildable: the covenant records *which pseudonym*
+defaulted, on chain, at a known offset, without that pseudonym's cooperation.
+The escrow's `kESC` magic bytes are what let a stranger recognise these
+transactions at all.
+
+The derivation rules mirror the live verifier — an attestation counts as
+anchored when the transaction *spending its anchor outpoint* carries its id —
+and are pinned by regression tests against transactions that really settled on
+testnet-10 during the M2–M4 runs.
+
+**Still to build:** the Noir circuit itself. The hash is SHA-256 behind a single
+indirection, because a real circuit will want something ZK-friendly like
+Poseidon, and the accumulator and the circuit must agree on it exactly or every
+proof fails.
+
 ## Next
 
 1. Finish the dogfood run's physical half.
-2. M6 — Noir circuit for selective disclosure (SPEC 1.5), using the anchored
-   chains from M1-M4 as test data.
+2. The Noir circuit over these accumulators.
 
 ## Deliberate design points (don't "fix" these)
 

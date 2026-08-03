@@ -83,7 +83,20 @@ impl Explorer {
     pub fn serve(self, listen: &str) -> Result<()> {
         let listener = TcpListener::bind(listen).with_context(|| format!("binding {listen}"))?;
         eprintln!("rep explorer on http://{listen}  (verifying against {})", self.rpc_url);
-        eprintln!("loopback only — this verifies with your node, so nobody has to be trusted");
+        let loopback = listen.starts_with("127.") || listen.starts_with("localhost") || listen.starts_with("[::1]");
+        if loopback {
+            eprintln!("loopback only — verification happens here, against your node");
+        } else {
+            // Reachable from the network. Nothing here writes, holds keys or
+            // touches the filesystem, so the exposure is bounded — but a single
+            // request can cost a full chain scan, and that is worth knowing
+            // before this ends up somewhere it can be reached from outside.
+            eprintln!(
+                "reachable from the network. No keys, no writes, read-only — but unauthenticated,\n\
+                 and one request can cost a multi-minute scan of your node. Fine on a LAN you\n\
+                 control; do not expose it to the internet."
+            );
+        }
         for stream in listener.incoming() {
             match stream {
                 Ok(s) => {
