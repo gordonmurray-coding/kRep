@@ -28,7 +28,15 @@ use crate::state::{OFF_MAKER, OFF_PHASE, OFF_SHIPPED_AT, OFF_TERMS, OFF_TRACKING
 use crate::{state::Phase, Terms, TX_ID_KEY};
 use kaspa_txscript::opcodes::codes::*;
 use kaspa_txscript::script_builder::{ScriptBuilder, ScriptBuilderResult};
+use kaspa_txscript::EngineFlags;
 use secp256k1::XOnlyPublicKey;
+
+/// A builder in covenant mode. The legacy limits (520-byte elements, 10 kB
+/// scripts) predate Toccata; a multi-branch covenant and its redeem-script push
+/// both exceed them, and these scripts are post-Toccata by construction.
+fn builder() -> ScriptBuilder {
+    ScriptBuilder::with_flags(EngineFlags { covenants_enabled: true, ..Default::default() })
+}
 
 /// Push the sequence that authenticates the supplied previous state.
 ///
@@ -70,7 +78,7 @@ fn require_new_field(b: &mut ScriptBuilder, start: usize, end: usize, want: &[u8
 /// and slashed on default. Claiming "as" someone else means funding their job.
 pub fn claim_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
 
     verify_prev_state(&mut b)?;
 
@@ -205,7 +213,7 @@ pub const TERMINAL_PAYLOAD_BYTES: usize = 64;
 /// moving money, so the buyer's dispute window and the bond both survive it.
 pub fn ship_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
     verify_prev_state(&mut b)?; // [sig, payload]
     require_prev_phase_and_job(&mut b, Phase::Claimed, &terms_id)?;
 
@@ -268,7 +276,7 @@ pub fn ship_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
 /// rather than a separate step someone can skip.
 pub fn settle_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
     verify_prev_state(&mut b)?; // [sig, payload]
     require_prev_phase_and_job(&mut b, Phase::Shipped, &terms_id)?;
 
@@ -298,7 +306,7 @@ pub fn settle_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
 /// one by carrying attestation-shaped bytes.
 pub fn refund_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
     verify_prev_state(&mut b)?; // [sig, payload]
     require_prev_phase_and_job(&mut b, Phase::Open, &terms_id)?;
     b.add_op(OpDrop)?; // [sig]
@@ -325,7 +333,7 @@ pub fn refund_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
 /// counter-signer of record.
 pub fn slash_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
     verify_prev_state(&mut b)?; // [sig, payload]
     require_prev_phase_and_job(&mut b, Phase::Claimed, &terms_id)?;
     b.add_op(OpDrop)?; // [sig]
@@ -350,7 +358,7 @@ pub fn slash_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
 /// silence must not hold a maker's bond hostage indefinitely.
 pub fn auto_release_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
     verify_prev_state(&mut b)?; // [sig, payload]
     require_prev_phase_and_job(&mut b, Phase::Shipped, &terms_id)?;
 
@@ -386,7 +394,7 @@ pub fn dispute_branch(terms: &Terms) -> Option<ScriptBuilderResult<Vec<u8>>> {
 
 fn build_dispute(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
     verify_prev_state(&mut b)?; // [sig, payload]
     require_prev_phase_and_job(&mut b, Phase::Shipped, &terms_id)?;
 
@@ -442,7 +450,7 @@ pub fn resolve_branch(terms: &Terms, resolution: Resolution) -> Option<ScriptBui
 
 fn build_resolve(terms: &Terms, arbiter: XOnlyPublicKey, resolution: Resolution) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
-    let mut b = ScriptBuilder::new();
+    let mut b = builder();
     verify_prev_state(&mut b)?; // [ben_sig, arb_sig, payload]
     require_prev_phase_and_job(&mut b, Phase::Disputed, &terms_id)?;
 
@@ -473,6 +481,88 @@ fn build_resolve(terms: &Terms, arbiter: XOnlyPublicKey, resolution: Resolution)
     require_p2pk_output(&mut b, 0, terms.claimed_value())?;
     b.add_op(OpTrue)?;
     Ok(b.drain())
+}
+
+
+/// Branch selector, pushed as the topmost signature-script item.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Branch {
+    Claim = 0,
+    Ship = 1,
+    Settle = 2,
+    AutoRelease = 3,
+    Dispute = 4,
+    ResolveToMaker = 5,
+    ResolveToBuyer = 6,
+    Slash = 7,
+    Refund = 8,
+}
+
+impl Branch {
+    pub fn selector(self) -> i64 {
+        self as i64
+    }
+}
+
+/// The complete escrow covenant: every branch under one script, and therefore
+/// under one address.
+///
+/// This matters more than it looks. Each branch checks that the escrow stays in
+/// "the same covenant" by comparing the spent output's script public key with
+/// the one it creates. If branches lived at separate addresses those checks
+/// would compare different scripts and the state machine would not actually
+/// connect — a claim would produce an output that the ship branch could never
+/// recognise. One script, one address, one escrow.
+///
+/// The signature script supplies `[branch args…] <prev_rest> <prev_payload>
+/// <selector> <redeem>`; the dispatcher consumes the selector and hands the
+/// rest to the chosen branch untouched.
+pub fn covenant_script(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
+    let mut arms: Vec<(Branch, Vec<u8>)> = vec![
+        (Branch::Claim, claim_branch(terms)?),
+        (Branch::Ship, ship_branch(terms)?),
+        (Branch::Settle, settle_branch(terms)?),
+        (Branch::AutoRelease, auto_release_branch(terms)?),
+        (Branch::Slash, slash_branch(terms)?),
+        (Branch::Refund, refund_branch(terms)?),
+    ];
+    // Only offered when someone can actually adjudicate.
+    if let Some(d) = dispute_branch(terms) {
+        arms.push((Branch::Dispute, d?));
+        arms.push((Branch::ResolveToMaker, resolve_branch(terms, Resolution::ToMaker).unwrap()?));
+        arms.push((Branch::ResolveToBuyer, resolve_branch(terms, Resolution::ToBuyer).unwrap()?));
+    }
+
+    let mut b = builder();
+    for (branch, code) in &arms {
+        b.add_op(OpDup)?
+            .add_i64(branch.selector())?
+            .add_op(OpNumEqual)?
+            .add_op(OpIf)?
+            .add_op(OpDrop)?; // the selector itself
+        for byte in code {
+            b.add_op(*byte)?;
+        }
+        b.add_op(OpElse)?;
+    }
+    // Unrecognised selector: fail rather than fall through to anything.
+    b.add_op(OpFalse)?;
+    for _ in &arms {
+        b.add_op(OpEndIf)?;
+    }
+    Ok(b.drain())
+}
+
+/// The escrow's script public key — what a buyer pays to open a job.
+pub fn escrow_spk(terms: &Terms) -> ScriptBuilderResult<kaspa_consensus_core::tx::ScriptPublicKey> {
+    Ok(kaspa_txscript::pay_to_script_hash_script(&covenant_script(terms)?))
+}
+
+/// The escrow's address on a given network — what a buyer sends the reward to.
+pub fn escrow_address(terms: &Terms, prefix: kaspa_addresses::Prefix) -> ScriptBuilderResult<kaspa_addresses::Address> {
+    let spk = escrow_spk(terms)?;
+    Ok(kaspa_txscript::extract_script_pub_key_address(&spk, prefix)
+        .expect("a p2sh script public key always yields an address"))
 }
 
 #[cfg(test)]
@@ -549,6 +639,7 @@ mod tests {
     /// at a time.
     struct Spend {
         script: Vec<u8>,
+        branch: Branch,
         prev_state: EscrowState,
         prev_value: u64,
         new_payload: Vec<u8>,
@@ -562,9 +653,10 @@ mod tests {
     }
 
     impl Spend {
-        fn new(script: Vec<u8>, prev_state: EscrowState, prev_value: u64) -> Self {
+        fn new(branch: Branch, terms: &Terms, prev_state: EscrowState, prev_value: u64) -> Self {
             Spend {
-                script,
+                script: covenant_script(terms).unwrap(),
+                branch,
                 prev_state,
                 prev_value,
                 new_payload: vec![],
@@ -579,20 +671,33 @@ mod tests {
 
     /// Execute a spend against the real script VM.
     fn run(spend: Spend) -> Result<(), TxScriptError> {
+        let selector = spend.branch.selector();
+        run_with_raw_selector(spend, selector)
+    }
+
+    fn run_with_raw_selector(spend: Spend, selector: i64) -> Result<(), TxScriptError> {
         let spk = pay_to_script_hash_script(&spend.script);
         let (rest, payload, outpoint) = prior(&spk, &spend.prev_state, spend.prev_value);
 
         // Args are pushed bottom-up: beneficiary sig, then arbiter sig, then
         // the state pair, matching each branch's documented stack.
         let build_sig_script = |sigs: Option<(Vec<u8>, Option<Vec<u8>>)>| {
-            let mut b = ScriptBuilder::new();
+            let mut b = builder();
             if let Some((primary, second)) = &sigs {
                 b.add_data(primary).unwrap();
                 if let Some(s2) = second {
                     b.add_data(s2).unwrap();
                 }
             }
-            b.add_data(&rest).unwrap().add_data(&payload).unwrap().add_data(&spend.script).unwrap().drain()
+            b.add_data(&rest)
+                .unwrap()
+                .add_data(&payload)
+                .unwrap()
+                .add_i64(selector)
+                .unwrap()
+                .add_data(&spend.script)
+                .unwrap()
+                .drain()
         };
 
         let make_tx = |sig_script: Vec<u8>| {
@@ -661,9 +766,8 @@ mod tests {
     }
 
     fn claim_spend(t: &Terms, new_state: EscrowState, out_value: u64, out_spk: Option<ScriptPublicKey>) -> Spend {
-        let script = claim_branch(t).unwrap();
-        let spk = out_spk.unwrap_or_else(|| pay_to_script_hash_script(&script));
-        let mut s = Spend::new(script, open_state(t), t.reward);
+        let spk = out_spk.unwrap_or_else(|| escrow_spk(t).unwrap());
+        let mut s = Spend::new(Branch::Claim, t, open_state(t), t.reward);
         s.new_payload = new_state.encode().to_vec();
         s.outputs = vec![TransactionOutput { value: out_value, script_public_key: spk, covenant: None }];
         s
@@ -730,15 +834,10 @@ mod tests {
     // ----------------------------------------------------------------- ship
 
     fn ship_spend(t: &Terms, new_state: EscrowState, lock_time: u64, signer: u8) -> Spend {
-        let script = ship_branch(t).unwrap();
-        let spk = pay_to_script_hash_script(&script);
-        let mut s = Spend::new(script, claimed_state(t), t.claimed_value());
+        let spk = escrow_spk(t).unwrap();
+        let mut s = Spend::new(Branch::Ship, t, claimed_state(t), t.claimed_value());
         s.new_payload = new_state.encode().to_vec();
-        s.outputs = vec![TransactionOutput {
-            value: t.claimed_value(),
-            script_public_key: spk,
-            covenant: None,
-        }];
+        s.outputs = vec![TransactionOutput { value: t.claimed_value(), script_public_key: spk, covenant: None }];
         s.lock_time = lock_time;
         s.signer = Some(kp(signer));
         s
@@ -810,8 +909,7 @@ mod tests {
     // --------------------------------------------------------------- settle
 
     fn settle_spend(t: &Terms, payload: Vec<u8>, out_value: u64, out_spk: ScriptPublicKey, signer: u8) -> Spend {
-        let script = settle_branch(t).unwrap();
-        let mut s = Spend::new(script, shipped_state(t, 900), t.claimed_value());
+        let mut s = Spend::new(Branch::Settle, t, shipped_state(t, 900), t.claimed_value());
         s.new_payload = payload;
         s.outputs = vec![TransactionOutput { value: out_value, script_public_key: out_spk, covenant: None }];
         s.signer = Some(kp(signer));
@@ -900,7 +998,7 @@ mod tests {
     }
 
     fn refund_spend(t: &Terms, lock_time: u64, out_value: u64, out_spk: ScriptPublicKey, signer: u8) -> Spend {
-        let mut s = Spend::new(refund_branch(t).unwrap(), open_state(t), t.reward);
+        let mut s = Spend::new(Branch::Refund, t, open_state(t), t.reward);
         s.outputs = vec![TransactionOutput { value: out_value, script_public_key: out_spk, covenant: None }];
         s.lock_time = lock_time;
         s.signer = Some(kp(signer));
@@ -942,7 +1040,7 @@ mod tests {
     // ---------------------------------------------------------------- slash
 
     fn slash_spend(t: &Terms, lock_time: u64, out_value: u64, out_spk: ScriptPublicKey, signer: u8) -> Spend {
-        let mut s = Spend::new(slash_branch(t).unwrap(), claimed_state(t), t.claimed_value());
+        let mut s = Spend::new(Branch::Slash, t, claimed_state(t), t.claimed_value());
         s.new_payload = attestation_payload();
         s.outputs = vec![TransactionOutput { value: out_value, script_public_key: out_spk, covenant: None }];
         s.lock_time = lock_time;
@@ -997,7 +1095,7 @@ mod tests {
     // --------------------------------------------------------- auto-release
 
     fn auto_spend(t: &Terms, sequence: u64, out_value: u64, out_spk: ScriptPublicKey, signer: u8) -> Spend {
-        let mut s = Spend::new(auto_release_branch(t).unwrap(), shipped_state(t, 900), t.claimed_value());
+        let mut s = Spend::new(Branch::AutoRelease, t, shipped_state(t, 900), t.claimed_value());
         s.new_payload = attestation_payload();
         s.outputs = vec![TransactionOutput { value: out_value, script_public_key: out_spk, covenant: None }];
         s.sequence = sequence;
@@ -1032,9 +1130,8 @@ mod tests {
     // -------------------------------------------------------------- dispute
 
     fn dispute_spend(t: &Terms, new_state: EscrowState, signer: u8) -> Spend {
-        let script = dispute_branch(t).unwrap().unwrap();
-        let spk = pay_to_script_hash_script(&script);
-        let mut s = Spend::new(script, shipped_state(t, 900), t.claimed_value());
+        let spk = escrow_spk(t).unwrap();
+        let mut s = Spend::new(Branch::Dispute, t, shipped_state(t, 900), t.claimed_value());
         s.new_payload = new_state.encode().to_vec();
         s.outputs = vec![TransactionOutput { value: t.claimed_value(), script_public_key: spk, covenant: None }];
         s.signer = Some(kp(signer));
@@ -1085,7 +1182,11 @@ mod tests {
     // -------------------------------------------------------------- resolve
 
     fn resolve_spend(t: &Terms, res: Resolution, out_spk: ScriptPublicKey, beneficiary: u8, arbiter: u8) -> Spend {
-        let mut s = Spend::new(resolve_branch(t, res).unwrap().unwrap(), disputed_state(t), t.claimed_value());
+        let branch = match res {
+            Resolution::ToMaker => Branch::ResolveToMaker,
+            Resolution::ToBuyer => Branch::ResolveToBuyer,
+        };
+        let mut s = Spend::new(branch, t, disputed_state(t), t.claimed_value());
         s.new_payload = attestation_payload();
         s.outputs =
             vec![TransactionOutput { value: t.claimed_value(), script_public_key: out_spk, covenant: None }];
@@ -1137,5 +1238,70 @@ mod tests {
         let mut not_disputed = resolve_spend(&t, Resolution::ToMaker, p2pk(MAKER), MAKER, ARBITER);
         not_disputed.prev_state = shipped_state(&t, 900);
         assert!(run(not_disputed).is_err(), "cannot resolve a dispute that was never raised");
+    }
+
+    // ----------------------------------------------------------- dispatcher
+
+    #[test]
+    fn every_branch_lives_at_one_address() {
+        let t = terms();
+        // The whole state machine has to share a single script public key, or
+        // the covenant-continuity checks would be comparing different scripts
+        // and a claim would produce an output the ship branch cannot recognise.
+        let spk = escrow_spk(&t).unwrap();
+        let addr = escrow_address(&t, kaspa_addresses::Prefix::Testnet).unwrap();
+        assert!(addr.to_string().starts_with("kaspatest:"));
+        assert_eq!(spk, kaspa_txscript::pay_to_address_script(&addr));
+
+        // And the address commits to the terms.
+        let other = Terms { reward: t.reward + 1, ..terms() };
+        assert_ne!(escrow_address(&other, kaspa_addresses::Prefix::Testnet).unwrap(), addr);
+
+        // Dropping the arbiter changes both the branch set and the address.
+        let timeout_only = Terms { arbiter: None, ..terms() };
+        assert_ne!(escrow_address(&timeout_only, kaspa_addresses::Prefix::Testnet).unwrap(), addr);
+        assert!(covenant_script(&timeout_only).unwrap().len() < covenant_script(&t).unwrap().len());
+    }
+
+    #[test]
+    fn an_unknown_selector_is_rejected() {
+        let t = terms();
+        // Selector 99 matches no arm; the dispatcher must fail rather than fall
+        // through into whichever branch happens to be last.
+        let otherwise_valid = claim_spend(&t, claimed_state(&t), t.claimed_value(), None);
+        assert!(
+            run_with_raw_selector(otherwise_valid, 99).is_err(),
+            "unknown selector must not execute anything"
+        );
+    }
+
+    #[test]
+    fn a_branch_cannot_be_run_under_another_branchs_selector() {
+        let t = terms();
+        // A perfectly valid claim, mislabelled as a settle: the settle arm runs
+        // and rejects it. Selector and intent must agree.
+        let mut mislabelled = claim_spend(&t, claimed_state(&t), t.claimed_value(), None);
+        mislabelled.branch = Branch::Settle;
+        assert!(run(mislabelled).is_err(), "claim executed under the settle selector must fail");
+
+        // And a settle mislabelled as a claim.
+        let mut wrong_way = settle_spend(&t, attestation_payload(), t.claimed_value(), p2pk(MAKER), BUYER);
+        wrong_way.branch = Branch::Claim;
+        assert!(run(wrong_way).is_err(), "settle executed under the claim selector must fail");
+    }
+
+    #[test]
+    fn pure_timeout_escrows_reject_dispute_selectors_outright() {
+        let t = Terms { arbiter: None, ..terms() };
+        // The arms simply are not in the script, so the selector matches nothing.
+        let mut s = Spend::new(Branch::Dispute, &t, shipped_state(&t, 900), t.claimed_value());
+        s.new_payload = disputed_state(&t).encode().to_vec();
+        s.outputs = vec![TransactionOutput {
+            value: t.claimed_value(),
+            script_public_key: escrow_spk(&t).unwrap(),
+            covenant: None,
+        }];
+        s.signer = Some(kp(BUYER));
+        assert!(run(s).is_err(), "no arbiter means no dispute path at all");
     }
 }
