@@ -47,7 +47,8 @@ ANCHOR=<txid>:<index>
 # one settlement, one anchor tx, two ids (64-byte payload).
 # --spend must be the same outpoint the attestations named.
 ./krep anchor --wallet wallet.key --rpc grpc://node:16110 --spend "$ANCHOR" \
-  --id $(./krep id < att.json) --id $(./krep id < mirror.att.json)   # add --submit to broadcast
+  --id $(./krep id < att.json) --id $(./krep id < mirror.att.json) --out tx.json
+./krep submit --tx tx.json --rpc grpc://node:16110   # sends exactly those bytes
 
 # verification requires a node; --offline is possible but proves nothing
 ./krep verify --chain a.chain.json --rpc grpc://node:16110
@@ -122,7 +123,26 @@ Consequences, stated plainly:
   are runaway guards, and exhausting either is reported as "ran out of budget",
   never as "not anchored".
 
-## Proven on mainnet
+## Review before you send
+
+`krep anchor` prices the transaction from the node's **live** fee estimate,
+which drifts. Two runs a minute apart pay different fees, return different
+change, and therefore have different txids — so `--submit` on a second
+invocation does not broadcast the transaction you just looked at. Observed on
+testnet-10: reviewed `efc6a977…`, sent `a0eb0141…`.
+
+Two workflows, both honest:
+
+- `anchor --out tx.json` then `submit --tx tx.json` — review the exact bytes
+  and send those. Verified: predicted and submitted txids match.
+- `anchor --submit` — build and send atomically, no review gap.
+
+Pinning `--fee-rate` also makes a build reproducible. Note this never
+endangered an anchor: verification looks for whatever transaction *spends* the
+anchor outpoint, so the settlement's own txid never has to be predicted or
+recorded.
+
+## Proven on-chain
 
 The loop has been run end to end against a synced mainnet node (2026-08):
 
@@ -143,9 +163,11 @@ Both transports were exercised against this anchor:
 | `grpc://` | own node, LAN | ~25s |
 | `wss://` (borsh wRPC) | unrelated public node | ~51s |
 
-The verifier is separately confirmed on **testnet-10**, against real settlements
-found on that chain — same two-phase spend-based path, same negative and
-unresolvable verdicts.
+The full loop was then repeated on **testnet-10** (node with 10 BPS): two
+settlements anchored and submitted, a two-attestation chain with two distinct
+anchors verifying, and `counterparty_diversity` correctly reporting 0.5 for a
+chain whose trades share one counterparty — the wash-trading signal working on
+real anchored data.
 
 The wRPC run matters beyond transport coverage: a node that has never seen any
 of our data independently confirmed both chains. That is the entire claim of

@@ -33,7 +33,7 @@ use kaspa_consensus_core::{
         TransactionOutput, UtxoEntry,
     },
 };
-use kaspa_rpc_core::RpcUtxoEntry;
+use kaspa_rpc_core::{RpcTransaction, RpcUtxoEntry};
 use kaspa_rpc_core::api::rpc::RpcApi;
 use kaspa_txscript::pay_to_address_script;
 use secp256k1::Keypair;
@@ -333,11 +333,29 @@ pub fn plan_tx(
 /// anchor is always a pure, reversible operation and spending is an explicit,
 /// separate act.
 pub async fn submit(rpc: &Arc<dyn RpcApi>, plan: &AnchorPlan) -> Result<String> {
-    let txid = rpc
-        .submit_transaction((&plan.tx).into(), false)
-        .await
-        .context("submit_transaction")?;
+    submit_rpc_tx(rpc, (&plan.tx).into()).await
+}
+
+pub async fn submit_rpc_tx(rpc: &Arc<dyn RpcApi>, tx: RpcTransaction) -> Result<String> {
+    let txid = rpc.submit_transaction(tx, false).await.context("submit_transaction")?;
     Ok(txid.to_string())
+}
+
+/// Serialize the signed transaction for review-then-send.
+///
+/// Rebuilding an anchor does not reproduce it byte for byte: the fee comes from
+/// the node's live estimate, which drifts, so a second `krep anchor` run pays a
+/// different fee, returns a different change amount, and therefore has a
+/// different txid. Reviewing one transaction and broadcasting a freshly built
+/// one is not a review at all — so the reviewed bytes are what get written
+/// here, and `krep submit` sends exactly those.
+pub fn to_json(plan: &AnchorPlan) -> Result<String> {
+    let rpc_tx: RpcTransaction = (&plan.tx).into();
+    Ok(serde_json::to_string_pretty(&rpc_tx)?)
+}
+
+pub fn from_json(s: &str) -> Result<RpcTransaction> {
+    serde_json::from_str(s).context("parsing signed transaction file")
 }
 
 #[cfg(test)]
@@ -514,6 +532,55 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("not a spendable UTXO"), "got {err}");
+    }
+
+    #[test]
+    fn signed_tx_round_trips_to_the_same_transaction() {
+        let key = test_key();
+        let address = address_for(Prefix::Testnet, &key);
+        let plan =
+            plan_tx(&address, &key, funded(&address, &[500_000_000]), &[[0xab; 32]], 1.0, None).unwrap();
+
+        // The review workflow is only meaningful if what is written is what is
+        // sent: same payload, same inputs, same signatures, same id.
+        let json = to_json(&plan).unwrap();
+        let back = from_json(&json).unwrap();
+
+        assert_eq!(back.payload, plan.payload, "payload must survive the round trip");
+        assert_eq!(back.inputs.len(), plan.tx.inputs.len());
+        assert_eq!(back.outputs.len(), plan.tx.outputs.len());
+        assert_eq!(back.outputs[0].value, plan.out_value);
+        for (a, b) in back.inputs.iter().zip(plan.tx.inputs.iter()) {
+            assert_eq!(a.previous_outpoint.transaction_id, b.previous_outpoint.transaction_id);
+            assert_eq!(a.previous_outpoint.index, b.previous_outpoint.index);
+            assert_eq!(a.signature_script, b.signature_script, "signature must survive");
+        }
+
+        // Rebuild a Transaction from the deserialized form and confirm the id
+        // is byte-identical — this is what makes `krep submit` send the
+        // reviewed transaction rather than an equivalent-looking one.
+        let mut rebuilt = Transaction::new_non_finalized(
+            back.version,
+            back.inputs
+                .iter()
+                .map(|i| TransactionInput {
+                    previous_outpoint: TransactionOutpoint::new(
+                        i.previous_outpoint.transaction_id,
+                        i.previous_outpoint.index,
+                    ),
+                    signature_script: i.signature_script.clone(),
+                    sequence: i.sequence,
+                    compute_commit: ComputeCommit::SigopCount(i.sig_op_count.into()),
+                })
+                .collect(),
+            plan.tx.outputs.clone(),
+            back.lock_time,
+            back.subnetwork_id.clone(),
+            back.gas,
+            back.payload.clone(),
+        );
+        rebuilt.finalize();
+        assert_eq!(rebuilt.id(), plan.tx.id(), "round-tripped tx must have the same id");
     }
 
     /// Clone everything but the transaction (which the caller replaces).

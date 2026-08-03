@@ -195,12 +195,26 @@ enum Cmd {
         /// kaspad endpoint. Falls back to $KREP_RPC.
         #[arg(long)]
         rpc: Option<String>,
-        /// Broadcast the transaction. Without this nothing is sent.
+        /// Broadcast immediately. What is built is what is sent.
         #[arg(long)]
         submit: bool,
-        /// Override feerate in sompi per gram.
+        /// Write the signed transaction here for review, then send it verbatim
+        /// with `krep submit`. Rebuilding would pay a different (live) fee and
+        /// so produce a different txid.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Override feerate in sompi per gram. Pins the fee, making the build
+        /// reproducible.
         #[arg(long)]
         fee_rate: Option<f64>,
+    },
+    /// Broadcast a signed transaction written by `krep anchor --out`.
+    Submit {
+        #[arg(long)]
+        tx: PathBuf,
+        /// kaspad endpoint. Falls back to $KREP_RPC.
+        #[arg(long)]
+        rpc: Option<String>,
     },
 }
 
@@ -538,7 +552,24 @@ fn main() -> Result<()> {
                 println!("{}:{}\t{} sompi", outpoint.transaction_id, outpoint.index, entry.amount);
             }
         }
-        Cmd::Anchor { wallet, ids, spend, rpc: rpc_url, submit, fee_rate } => {
+        Cmd::Submit { tx, rpc: rpc_url } => {
+            let raw = fs::read_to_string(&tx).with_context(|| format!("reading {}", tx.display()))?;
+            let signed = anchor::from_json(&raw)?;
+            let url = rpc::endpoint(&rpc_url).ok_or_else(|| {
+                anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
+            })?;
+            eprintln!(
+                "submitting {} — payload {} bytes: {}",
+                tx.display(),
+                signed.payload.len(),
+                hex::encode(&signed.payload)
+            );
+            let session = open_rpc(&url)?;
+            let txid = session.rt.block_on(anchor::submit_rpc_tx(&session.client, signed))?;
+            eprintln!("SUBMITTED — this spent real funds and cannot be undone");
+            println!("{txid}");
+        }
+        Cmd::Anchor { wallet, ids, spend, rpc: rpc_url, submit, out, fee_rate } => {
             let kp = load_wallet(&wallet)?;
             let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
             let to_spend = parse_outpoint(&spend)?;
@@ -568,15 +599,30 @@ fn main() -> Result<()> {
             eprintln!("  payload {} bytes committing {} attestation id(s)", plan.payload.len(), ids.len());
             eprintln!("  payload hex {}", hex::encode(&plan.payload));
 
+            if let Some(path) = &out {
+                fs::write(path, anchor::to_json(&plan)?)?;
+                eprintln!("signed transaction written to {}", path.display());
+            }
+
             if submit {
                 let txid = session.rt.block_on(anchor::submit(&session.client, &plan))?;
                 eprintln!("SUBMITTED — this spent real funds and cannot be undone");
                 println!("{txid}");
             } else {
-                eprintln!(
-                    "NOT submitted. Re-run with --submit to broadcast (this spends real funds). \
-                     The txid below is what the transaction WILL have if submitted unchanged."
-                );
+                eprintln!("NOT submitted.");
+                match &out {
+                    Some(path) => eprintln!(
+                        "Send exactly this transaction with:\n                           krep submit --tx {} --rpc <url>",
+                        path.display()
+                    ),
+                    None => eprintln!(
+                        "NOTE: re-running with --submit rebuilds the transaction against the \
+                         node's live fee estimate, which drifts — so the fee, the change amount \
+                         and the txid below can all differ from what is finally sent. To review \
+                         and then send the very same bytes, use --out <file> and `krep submit`; \
+                         to make the build reproducible, pin --fee-rate."
+                    ),
+                }
                 println!("{}", plan.txid());
             }
         }
