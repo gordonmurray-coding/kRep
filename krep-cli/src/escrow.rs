@@ -43,9 +43,14 @@ pub struct Live {
     /// The transaction that produced it, split for the covenant's state proof.
     pub prev_rest: String,
     pub prev_payload: String,
-    /// A wallet output from the same transaction, used to pay the next fee.
+    /// A wallet output from the same transaction, available to pay the next
+    /// fee — but only to the party it actually belongs to.
     pub fee_outpoint: Option<String>,
     pub fee_value: u64,
+    /// Address that change was paid to, so the next mover can tell whether it
+    /// is theirs to spend.
+    #[serde(default)]
+    pub fee_address: Option<String>,
 }
 
 pub fn load(path: &Path) -> Result<EscrowFile> {
@@ -105,6 +110,41 @@ pub async fn wallet_utxos(
     Ok((addr, utxos))
 }
 
+/// A plain transfer. Escrow participants are separate parties with separate
+/// funds — the maker signs their own shipment and pays for it — so standing one
+/// up needs a way to move value to them.
+pub async fn send(
+    rpc: &Arc<dyn RpcApi>,
+    key: &Keypair,
+    to: &kaspa_addresses::Address,
+    amount: u64,
+) -> Result<Transaction> {
+    let network = rpc.get_current_network().await.map_err(|e| anyhow!("get_current_network: {e}"))?;
+    let prefix = kaspa_addresses::Prefix::from(network);
+    let (addr, utxos) = wallet_utxos(rpc, key, prefix).await?;
+    let fee = covenant_fee(rpc).await;
+    let (op, entry) = utxos
+        .into_iter()
+        .filter(|(_, e)| e.amount > amount + fee)
+        .max_by_key(|(_, e)| e.amount)
+        .ok_or_else(|| anyhow!("no UTXO at {addr} large enough for {amount} sompi + fees"))?;
+    let change = entry.amount - amount - fee;
+    Ok(build(
+        key,
+        &[Input { outpoint: op, entry, unlock: Unlock::Wallet }],
+        vec![
+            TransactionOutput { value: amount, script_public_key: pay_to_address_script(to), covenant: None },
+            TransactionOutput {
+                value: change,
+                script_public_key: pay_to_address_script(&addr),
+                covenant: None,
+            },
+        ],
+        vec![],
+        0,
+    ))
+}
+
 /// Open the escrow: pay the reward in, with the OPEN state as payload.
 pub async fn open(rpc: &Arc<dyn RpcApi>, key: &Keypair, terms: &Terms) -> Result<(Transaction, Live)> {
     let network = rpc.get_current_network().await.map_err(|e| anyhow!("get_current_network: {e}"))?;
@@ -140,6 +180,7 @@ pub async fn open(rpc: &Arc<dyn RpcApi>, key: &Keypair, terms: &Terms) -> Result
         prev_payload: hex::encode(payload),
         fee_outpoint: Some(format!("{}:1", tx.id())),
         fee_value: change,
+        fee_address: Some(addr.to_string()),
     };
     Ok((tx, live))
 }
@@ -167,14 +208,28 @@ async fn transition(
     let script = covenant_script(terms).map_err(|e| anyhow!("building covenant: {e}"))?;
     let fee = covenant_fee(rpc).await;
 
-    let fee_op = live
-        .fee_outpoint
-        .as_deref()
-        .ok_or_else(|| anyhow!("no wallet output recorded to pay the fee from"))?;
-    if live.fee_value < fee + extra_in {
-        bail!("recorded fee output holds {} sompi, need {}", live.fee_value, fee + extra_in);
-    }
-    let change = live.fee_value - fee - extra_in;
+    // Whoever performs a transition pays for it out of their own funds.
+    //
+    // The escrow's own change output is preferred when it belongs to this
+    // signer: it is the freshest thing they own and, crucially, is guaranteed
+    // not to be double-spent by an in-flight transaction of their own. Picking
+    // "largest confirmed UTXO" instead looks reasonable and is not — a party
+    // moving twice in a row can select an output their previous, still
+    // unconfirmed, transaction already spent.
+    let mine = live.fee_address.as_deref() == Some(addr.to_string().as_str());
+    let recorded = live.fee_outpoint.as_deref();
+    let (fee_outpoint, fee_value) = match (mine, recorded) {
+        (true, Some(op)) if live.fee_value >= fee + extra_in => (parse_outpoint(op)?, live.fee_value),
+        _ => wallet_utxos(rpc, key, prefix)
+            .await?
+            .1
+            .into_iter()
+            .filter(|(_, e)| e.amount > fee + extra_in)
+            .max_by_key(|(_, e)| e.amount)
+            .map(|(op, e)| (op, e.amount))
+            .ok_or_else(|| anyhow!("no spendable funds at {addr} to pay the {fee} sompi fee"))?,
+    };
+    let change = fee_value - fee - extra_in;
 
     let inputs = vec![
         Input {
@@ -189,8 +244,8 @@ async fn transition(
             },
         },
         Input {
-            outpoint: parse_outpoint(fee_op)?,
-            entry: UtxoEntry::new(live.fee_value, wallet_spk.clone(), 0, false, None),
+            outpoint: fee_outpoint,
+            entry: UtxoEntry::new(fee_value, wallet_spk.clone(), 0, false, None),
             unlock: Unlock::Wallet,
         },
     ];
@@ -208,6 +263,7 @@ async fn transition(
         prev_payload: hex::encode(payload_part),
         fee_outpoint: Some(format!("{}:{}", tx.id(), tx.outputs.len() - 1)),
         fee_value: change,
+        fee_address: Some(addr.to_string()),
     };
     Ok((tx, live_next))
 }
@@ -419,4 +475,117 @@ pub fn describe(terms: &Terms, prefix: kaspa_addresses::Prefix) -> Result<String
         terms.deadline,
         terms.auto_release_delay,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// reputation: deriving attestations from the settlement itself
+// ---------------------------------------------------------------------------
+
+/// Coarse volume tier from the reward, in sompi.
+///
+/// SPEC 1.2 keeps buckets rather than amounts so a reputation chain does not
+/// leak a ledger. The boundaries are round numbers of KAS; what matters is that
+/// they are fixed and public, so two parties derive the same bucket without
+/// negotiating it.
+pub fn amount_bucket(reward: u64) -> u8 {
+    const KAS: u64 = 100_000_000;
+    match reward {
+        r if r < 10 * KAS => 1,
+        r if r < 100 * KAS => 2,
+        r if r < 1_000 * KAS => 3,
+        _ => 4,
+    }
+}
+
+/// The escrow identities *are* the reputation identities here: the covenant
+/// names a buyer in its terms and a maker in its state, and those are the
+/// pubkeys whose chains the settlement feeds. Splitting payment identity from
+/// reputation identity would need a separate binding, which the spec does not
+/// yet define.
+pub struct Parties {
+    pub maker: secp256k1::XOnlyPublicKey,
+    pub buyer: secp256k1::XOnlyPublicKey,
+}
+
+pub fn parties(terms: &Terms, live: &Live) -> Result<Parties> {
+    let state = EscrowState::decode(&hex::decode(&live.prev_payload)?)
+        .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
+    Ok(Parties {
+        maker: state.maker.ok_or_else(|| anyhow!("escrow names no maker yet"))?,
+        buyer: terms.buyer,
+    })
+}
+
+/// The attestation body a settlement produces for one side.
+///
+/// Every field is dictated by the escrow — the anchor is the outpoint the
+/// settlement will spend, the roles come from who did what, the bucket from the
+/// reward. Nothing here is a free choice, which is the point: two parties
+/// settling the same escrow derive the same pair of bodies.
+#[allow(clippy::too_many_arguments)]
+pub fn settlement_body(
+    terms: &Terms,
+    live: &Live,
+    owner: secp256k1::XOnlyPublicKey,
+    counterparty: secp256k1::XOnlyPublicKey,
+    role: krep_core::Role,
+    outcome: krep_core::Outcome,
+    prev: Option<[u8; 32]>,
+    index: u64,
+    ts: u64,
+) -> Result<krep_core::AttestationBody> {
+    let outpoint = parse_outpoint(&live.outpoint)?;
+    Ok(krep_core::AttestationBody {
+        v: 1,
+        anchor: krep_core::Outpoint {
+            txid: outpoint.transaction_id.as_bytes(),
+            index: outpoint.index,
+        },
+        role,
+        owner,
+        counterparty,
+        outcome,
+        amount_bucket: amount_bucket(terms.reward),
+        prev,
+        index,
+        ts,
+    })
+}
+
+/// The default attestation a slash produces against the maker.
+///
+/// Unlike a settlement's, this one needs nobody's cooperation: it carries no
+/// signatures, and its authority is that the slash branch of this covenant
+/// executed against an escrow whose state named this maker. The buyer can build
+/// it alone, which is exactly what makes "0 defaults" checkable.
+pub fn default_attestation(
+    terms: &Terms,
+    live: &Live,
+    prev: Option<[u8; 32]>,
+    index: u64,
+    ts: u64,
+) -> Result<krep_core::Attestation> {
+    let p = parties(terms, live)?;
+    let body = settlement_body(
+        terms,
+        live,
+        p.maker,
+        p.buyer,
+        krep_core::Role::Provider,
+        krep_core::Outcome::Default,
+        prev,
+        index,
+        ts,
+    )?;
+    let witness = krep_core::CovenantWitness {
+        redeem_script: covenant_script(terms).map_err(|e| anyhow!("{e}"))?,
+        branch: Branch::Slash as u8,
+        owner_offset: krep_escrow::state::OFF_MAKER as u16,
+    };
+    let att = krep_core::Attestation {
+        body,
+        auth: krep_core::Authorization::Covenant { covenant_witness: witness },
+    };
+    att.verify().map_err(|e| anyhow!("derived default attestation is malformed: {e}"))?;
+    Ok(att)
 }

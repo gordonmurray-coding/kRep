@@ -127,10 +127,15 @@ enum Cmd {
     },
     /// Countersign a partial attestation from stdin (stdout: full attestation).
     Countersign {
+        /// Master seed; derives the pseudonym with --context.
+        #[arg(long, requires = "context")]
+        seed: Option<PathBuf>,
         #[arg(long)]
-        seed: PathBuf,
-        #[arg(long)]
-        context: String,
+        context: Option<String>,
+        /// A raw key file instead — for escrow participants, whose reputation
+        /// identity is the pubkey the covenant names.
+        #[arg(long, conflicts_with = "seed")]
+        wallet: Option<PathBuf>,
         /// Also emit the role-flipped mirror attestation for the countersigner's
         /// own chain, to <path>. Both ids can share one anchor transaction.
         #[arg(long)]
@@ -176,6 +181,19 @@ enum Cmd {
     WalletPubkey {
         #[arg(long)]
         wallet: PathBuf,
+    },
+    /// Send funds to an address. Enough to stand up counterparties for testing.
+    Send {
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        amount: u64,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
     },
     /// List the wallet's spendable outpoints — candidates to name as an anchor.
     WalletUtxos {
@@ -311,29 +329,51 @@ enum EscrowCmd {
         #[arg(long)]
         submit: bool,
     },
+    /// Build the attestation this escrow's settlement owes a party.
+    ///
+    /// Every field is dictated by the escrow, so both sides derive the same
+    /// body; the holder signs it as owner and the counterparty countersigns.
+    Attest {
+        #[arg(long)]
+        escrow: PathBuf,
+        /// The party's key — the same one the escrow names.
+        #[arg(long)]
+        wallet: PathBuf,
+        /// That party's chain, to position the entry.
+        #[arg(long)]
+        chain: Option<PathBuf>,
+        #[arg(long)]
+        ts: Option<u64>,
+    },
     /// Release reward + bond to the maker (buyer).
     Settle {
         #[arg(long)]
         escrow: PathBuf,
         #[arg(long)]
         wallet: PathBuf,
-        /// Attestation id to commit, hex. Repeat for the mirror.
-        #[arg(long = "id", required = true)]
-        ids: Vec<String>,
+        /// Co-signed attestation file to commit. Repeat for the mirror.
+        #[arg(long = "att", required = true)]
+        atts: Vec<PathBuf>,
         #[arg(long)]
         rpc: Option<String>,
         #[arg(long)]
         submit: bool,
     },
     /// Take reward + bond after a maker fails to ship (buyer).
+    ///
+    /// Derives the maker's default attestation automatically — it needs no
+    /// signature from them, which is the whole point.
     Slash {
         #[arg(long)]
         escrow: PathBuf,
         #[arg(long)]
         wallet: PathBuf,
-        /// Attestation id to commit, hex. Repeat for the mirror.
-        #[arg(long = "id", required = true)]
-        ids: Vec<String>,
+        /// Where to write the default attestation the slash produces.
+        #[arg(long)]
+        default_out: PathBuf,
+        /// The maker's chain, if known, to position the entry.
+        #[arg(long)]
+        maker_chain: Option<PathBuf>,
         #[arg(long)]
         rpc: Option<String>,
         #[arg(long)]
@@ -660,11 +700,59 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
                 s.rt.block_on(escrow::ship(&s.client, &key, &f.terms, live, maker, parse_id(&tracking)?))?;
             finish(&s, &mut f, &path, tx, next, submit, "SHIP")?;
         }
-        EscrowCmd::Settle { escrow: path, wallet, ids, rpc, submit } => {
+        EscrowCmd::Attest { escrow: path, wallet, chain, ts } => {
+            let f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let me = key.x_only_public_key().0;
+            let p = escrow::parties(&f.terms, live)?;
+            // Which side of the trade this key is on decides the role, and the
+            // escrow decides everything else.
+            let (counterparty, role) = if me == p.maker {
+                (p.buyer, Role::Provider)
+            } else if me == p.buyer {
+                (p.maker, Role::Client)
+            } else {
+                bail!("this key is neither the buyer nor the maker of that escrow");
+            };
+            let (prev, index) = match &chain {
+                Some(c) if c.exists() => {
+                    let ch = load_chain(c)?;
+                    if ch.owner != me {
+                        bail!("--chain belongs to a different pseudonym");
+                    }
+                    (ch.head(), ch.attestations.len() as u64)
+                }
+                _ => (None, 0),
+            };
+            let body = escrow::settlement_body(
+                &f.terms,
+                live,
+                me,
+                counterparty,
+                role,
+                Outcome::Success,
+                prev,
+                index,
+                ts.unwrap_or_else(now),
+            )?;
+            println!("{}", serde_json::to_string_pretty(&create_partial(&key, body)?)?);
+        }
+        EscrowCmd::Settle { escrow: path, wallet, atts, rpc, submit } => {
             let mut f = escrow::load(&path)?;
             let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
             let key = load_wallet(&wallet)?;
-            let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
+            let mut ids: Vec<[u8; 32]> = Vec::new();
+            for a in &atts {
+                let att: Attestation = serde_json::from_str(
+                    &fs::read_to_string(a).with_context(|| format!("reading {}", a.display()))?,
+                )?;
+                att.verify().map_err(|e| anyhow!("{}: {e}", a.display()))?;
+                if att.body.anchor != parse_outpoint(&live.outpoint)? {
+                    bail!("{} is anchored to a different outpoint than this settlement spends", a.display());
+                }
+                ids.push(att.id());
+            }
             let state = krep_escrow::state::EscrowState::decode(&hex::decode(&live.prev_payload)?)
                 .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
             let maker = state.maker.ok_or_else(|| anyhow!("escrow has no maker to pay"))?;
@@ -682,11 +770,25 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
             ))?;
             finish(&s, &mut f, &path, tx, next, submit, "SETTLE")?;
         }
-        EscrowCmd::Slash { escrow: path, wallet, ids, rpc, submit } => {
+        EscrowCmd::Slash { escrow: path, wallet, default_out, maker_chain, rpc, submit } => {
             let mut f = escrow::load(&path)?;
             let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
             let key = load_wallet(&wallet)?;
-            let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
+            let (prev, index) = match &maker_chain {
+                Some(c) if c.exists() => {
+                    let ch = load_chain(c)?;
+                    (ch.head(), ch.attestations.len() as u64)
+                }
+                _ => (None, 0),
+            };
+            let default_att = escrow::default_attestation(&f.terms, live, prev, index, now())?;
+            let ids = vec![default_att.id()];
+            fs::write(&default_out, serde_json::to_string_pretty(&default_att)?)?;
+            eprintln!(
+                "default attestation written to {} — the maker never signed it and cannot\n\
+                 repudiate it; anyone with a node can check it once this slash confirms",
+                default_out.display()
+            );
             let deadline = f.terms.deadline;
             let buyer = f.terms.buyer;
             let s = escrow_session(&rpc)?;
@@ -804,8 +906,12 @@ fn main() -> Result<()> {
             let partial = create_partial(&kp, body)?;
             println!("{}", serde_json::to_string_pretty(&partial)?);
         }
-        Cmd::Countersign { seed, context, mirror_out, mirror_chain } => {
-            let kp = load_keypair(&seed, &context)?;
+        Cmd::Countersign { seed, context, wallet, mirror_out, mirror_chain } => {
+            let kp = match (&seed, &context, &wallet) {
+                (Some(s), Some(c), None) => load_keypair(s, c)?,
+                (None, _, Some(w)) => load_wallet(w)?,
+                _ => bail!("pass either --seed with --context, or --wallet"),
+            };
             let partial: PartialAttestation = serde_json::from_str(&stdin_str()?)?;
             let att = countersign(&kp, partial)?;
             println!("{}", serde_json::to_string_pretty(&att)?);
@@ -900,6 +1006,23 @@ fn main() -> Result<()> {
             let net = NetworkType::from_str(&network)
                 .map_err(|e| anyhow!("bad --network {network:?}: {e}"))?;
             println!("{}", anchor::address_for(net.into(), &kp));
+        }
+        Cmd::Send { wallet, to, amount, rpc: rpc_url, submit } => {
+            let key = load_wallet(&wallet)?;
+            let url = rpc::endpoint(&rpc_url).ok_or_else(|| {
+                anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
+            })?;
+            let session = open_rpc(&url)?;
+            let dest = kaspa_addresses::Address::try_from(to.as_str()).map_err(|e| anyhow!("bad address: {e}"))?;
+            let tx = session.rt.block_on(escrow::send(&session.client, &key, &dest, amount))?;
+            if submit {
+                let txid = session.rt.block_on(anchor::submit_rpc_tx(&session.client, (&tx).into()))?;
+                eprintln!("SUBMITTED");
+                println!("{txid}");
+            } else {
+                eprintln!("NOT submitted. Re-run with --submit to broadcast.");
+                println!("{}", tx.id());
+            }
         }
         Cmd::WalletPubkey { wallet } => {
             println!("{}", hex::encode(load_wallet(&wallet)?.x_only_public_key().0.serialize()));

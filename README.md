@@ -222,7 +222,38 @@ krep escrow settle --escrow job.json --wallet buyer.key --id <att> --id <att> --
 
 `dispute` / `resolve` and `slash` / `refund` replace `settle` on the failure
 paths. Resolution takes two signatures — `--wallet` for the beneficiary and
-`--arbiter-key` for the arbiter. Without `--submit`
+`--arbiter-key` for the arbiter.
+
+### Reputation as a side effect
+
+The escrow already knows every fact an attestation needs — who traded, in which
+role, against which outpoint, for what size — so it derives them rather than
+asking:
+
+```bash
+# both sides derive the same pair of bodies from the escrow, and co-sign
+krep escrow attest --escrow job.json --wallet maker.key --chain m.chain.json > m.part.json
+krep escrow attest --escrow job.json --wallet buyer.key --chain b.chain.json > b.part.json
+krep countersign --wallet buyer.key < m.part.json > m.att.json
+krep countersign --wallet maker.key < b.part.json > b.att.json
+
+krep escrow settle --escrow job.json --wallet buyer.key --att m.att.json --att b.att.json --submit
+```
+
+Nothing about the body is a free choice, so two parties settling the same escrow
+derive the same pair — there is nothing to negotiate. `settle` refuses an
+attestation anchored to a different outpoint than the one it is about to spend.
+
+The slash path needs no cooperation at all, because the default carries no
+signatures:
+
+```bash
+krep escrow slash --escrow job.json --wallet buyer.key --default-out default.json --submit
+```
+
+Both were run on testnet-10: a settlement where each side's chain verified from
+the one transaction, and a slash whose derived default verified and scored
+`defaults 1` against a maker who signed nothing. Without `--submit`
 nothing is sent and the state file is left untouched, so a dry run cannot
 desynchronise the client from the chain.
 
