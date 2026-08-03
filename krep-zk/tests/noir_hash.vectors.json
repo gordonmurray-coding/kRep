@@ -1,0 +1,17 @@
+{
+  "_source": "Captured from nargo 1.0.0-beta.26 (noirc 40d6574f) by executing a Noir program that prints each hash. These are ground truth: any Rust implementation intended to feed a Noir circuit must reproduce them exactly, or the root the verifier rebuilds will differ from the one the circuit computes and every proof will fail.",
+  "_noir_stdlib_note": "In this version std::hash exposes poseidon2_permutation and pedersen_hash. Poseidon v1 and sha256 are NOT in the stdlib; they moved to external libraries.",
+  "poseidon2_permutation": {
+    "state_size": 4,
+    "cases": [
+      { "input": ["0", "0", "0", "0"], "output_0": "0x18dfb8dc9b82229cff974efefc8df78b1ce96d9d844236b496785c698bc6732e" },
+      { "input": ["1", "2", "3", "4"], "output_0": "0x224785a48a72c75e2cbb698143e71d5d41bd89a2b9a7185871e39a54ce5785b1" }
+    ]
+  },
+  "pedersen_hash": {
+    "cases": [
+      { "input": ["0", "0"], "output": "0x27b1d0839a5b23baf12a8d195b18ac288fcf401afb2f70b8a4b529ede5fa9fed" },
+      { "input": ["1", "2"], "output": "0x17cb544f4d22abbae88f69c706f21367d7925abb131a13836745714dc896c150" }
+    ]
+  }
+}

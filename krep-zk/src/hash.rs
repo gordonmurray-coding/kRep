@@ -2,17 +2,26 @@
 //!
 //! # Choosing it
 //!
-//! This is SHA-256, which Noir supports natively and which the project already
-//! uses for Nostr event ids. It is a placeholder in one specific sense: SHA-256
-//! is expensive inside a circuit — thousands of constraints per compression —
-//! so a production circuit proving membership across a 30-deep Merkle path will
-//! want a ZK-friendly hash such as Poseidon instead.
+//! This is SHA-256, and it is provisional. SHA-256 is expensive inside a
+//! circuit, so a proof walking a deep Merkle path wants a ZK-friendly hash.
 //!
-//! That swap has to happen in *both* places at once. The accumulator a verifier
-//! rebuilds from chain data and the hash the circuit computes must agree
-//! exactly, or every proof fails. Hence the indirection: everything below goes
-//! through [`hash_leaf`] and [`hash_node`], and changing the primitive is a
-//! change to this file only.
+//! Two things have to be true of whatever replaces it, and they constrain the
+//! choice more than "which hash is cheapest" does.
+//!
+//! **Rust and Noir must compute it identically.** The verifier rebuilds the
+//! root from chain data in Rust; the circuit recomputes paths in Noir. If the
+//! two disagree by so much as a round constant, every proof fails. Reference
+//! vectors captured from the real toolchain live in
+//! `tests/noir_hash.vectors.json` — a candidate implementation is only usable
+//! if it reproduces them.
+//!
+//! **The value type changes with it.** Poseidon and Pedersen operate on BN254
+//! field elements, not bytes, and the field is 254 bits while an attestation id
+//! is 256. Ids do not fit. Reducing them modulo the field order is not
+//! injective — roughly four fifths of the id space wraps — so the encoding must
+//! split each id into two 128-bit limbs instead. That changes the leaf and node
+//! types throughout the accumulator, so switching is *not* a change confined to
+//! this file, contrary to what an earlier version of this comment claimed.
 //!
 //! Leaves and internal nodes are domain-separated. Without that, an internal
 //! node's preimage could be presented as a leaf, letting a prover claim

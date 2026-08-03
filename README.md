@@ -530,10 +530,32 @@ anchored when the transaction *spending its anchor outpoint* carries its id —
 and are pinned by regression tests against transactions that really settled on
 testnet-10 during the M2–M4 runs.
 
-**Still to build:** the Noir circuit itself. The hash is SHA-256 behind a single
-indirection, because a real circuit will want something ZK-friendly like
-Poseidon, and the accumulator and the circuit must agree on it exactly or every
-proof fails.
+### The hash question, with the toolchain installed
+
+nargo 1.0.0-beta.26 is in, and probing it changed the picture. Its stdlib
+exposes `poseidon2_permutation` (state size 4) and `pedersen_hash`; **Poseidon
+v1 and sha256 are not in the stdlib at all** — both moved to external
+libraries. Reference vectors from the real compiler are vendored at
+`krep-zk/tests/noir_hash.vectors.json`.
+
+Two constraints bind harder than "which hash is cheapest":
+
+- **Rust and Noir must agree exactly.** The verifier rebuilds the root in Rust;
+  the circuit recomputes paths in Noir. A single differing round constant makes
+  every proof fail. SHA-256 is interoperable by construction because it is
+  standardised — Poseidon2 is a *family*, and a Rust implementation is only
+  usable if it reproduces the vendored vectors.
+- **The value type changes with the hash.** Poseidon and Pedersen work on BN254
+  field elements, not bytes, and the field is 254 bits against a 256-bit
+  attestation id. Ids do not fit. Reducing modulo the field order is not
+  injective — about four fifths of the id space wraps — so ids must split into
+  two 128-bit limbs, which changes leaf and node types throughout the
+  accumulator.
+
+So the swap is a change to the accumulator's shape, not just its hash. An
+earlier note in this repo claimed otherwise; that was wrong.
+
+**Still to build:** the circuit, and the decision above.
 
 ## Next
 
