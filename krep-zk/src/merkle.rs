@@ -28,11 +28,37 @@ pub struct MerkleProof {
 }
 
 impl MerkleTree {
+    /// Build to a fixed depth, padding with a designated empty leaf.
+    ///
+    /// A circuit's array sizes are static, so it can only walk a path of one
+    /// known length. A minimal-depth tree whose shape follows the leaf count
+    /// would therefore need a different circuit for every accumulator size.
+    /// Fixing the depth decouples the two: the tree holds up to `2^depth`
+    /// leaves and every proof is exactly `depth` siblings long.
+    pub fn build_fixed_depth(values: impl IntoIterator<Item = Vec<u8>>, depth: usize) -> MerkleTree {
+        let mut leaves: Vec<Field> = values.into_iter().map(|v| hash_leaf(&v)).collect();
+        leaves.sort_unstable_by_key(|f| f.to_string());
+        leaves.dedup();
+        let capacity = 1usize << depth;
+        assert!(leaves.len() <= capacity, "{} leaves exceed depth {depth}", leaves.len());
+        let real = leaves.len();
+        leaves.resize(capacity, empty_leaf());
+
+        let mut levels = vec![leaves.clone()];
+        for _ in 0..depth {
+            let prev = levels.last().expect("non-empty");
+            let next: Vec<Field> = prev.chunks(2).map(|p| hash_node(&p[0], &p[1])).collect();
+            levels.push(next);
+        }
+        leaves.truncate(real);
+        MerkleTree { levels, leaves }
+    }
+
     /// Build from raw values. Sorted and de-duplicated, so the root depends
     /// only on which values are present.
     pub fn build(values: impl IntoIterator<Item = Vec<u8>>) -> MerkleTree {
         let mut leaves: Vec<Field> = values.into_iter().map(|v| hash_leaf(&v)).collect();
-        leaves.sort_unstable();
+        leaves.sort_unstable_by_key(|f| f.to_string());
         leaves.dedup();
         Self::from_sorted_leaves(leaves)
     }
@@ -71,7 +97,7 @@ impl MerkleTree {
 
     pub fn index_of(&self, value: &[u8]) -> Option<usize> {
         let leaf = hash_leaf(value);
-        self.leaves.binary_search(&leaf).ok()
+        self.leaves.iter().position(|l| *l == leaf)
     }
 
     pub fn prove(&self, value: &[u8]) -> Option<MerkleProof> {
@@ -88,6 +114,12 @@ impl MerkleTree {
         }
         Some(MerkleProof { leaf_index: self.index_of(value)?, siblings })
     }
+}
+
+/// The value padding an unoccupied slot. Distinct from any real leaf because
+/// real leaves absorb their own byte length, and this absorbs none.
+pub fn empty_leaf() -> Field {
+    crate::hash::hash_leaf_fields(&[])
 }
 
 /// Recompute a root from a value and its path. This is the half a circuit

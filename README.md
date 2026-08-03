@@ -560,7 +560,43 @@ inputs are absorbed into the rate three at a time, the first state element is
 squeezed. Leaves and nodes carry different tags, so an internal node's preimage
 can never be presented as a leaf.
 
-**Still to build:** the circuit itself.
+### The circuit
+
+`krep-zk/circuit/` is a Noir program proving, without revealing which chain:
+*"the pseudonym I control owns at least N anchored attestations, and is not
+among the pseudonyms recorded as having defaulted."*
+
+Both roots are public inputs. Both are rebuildable from chain data by anyone
+with a node, so the prover does not choose them.
+
+`krep-zk/examples/prover_input.rs` generates a witness from the *real*
+accumulators — including two attestation ids that genuinely settled on
+testnet-10 — so the circuit is exercised against the code a verifier runs
+rather than hand-written fixtures. Executing it proves the Rust and Noir sponges
+agree exactly; if they differed by one round constant the root check would fail.
+
+```
+honest prover (clean pseudonym)   -> witness solved
+the defaulter attempting the same -> Failed assertion (defaults root)
+```
+
+**Known gap, stated plainly.** As written the circuit proves that *some*
+attestations are anchored and that *a* pseudonym has not defaulted — but nothing
+binds those together. A prover could pair someone else's anchored successes with
+their own clean pseudonym.
+
+Closing it means proving `owner == pseudonym` per attestation, which means
+recomputing the attestation id from its body in-circuit, since the id is all the
+accumulator can hold. That id is `blake3(body ‖ signatures)`, and blake3 is
+neither in Noir's stdlib nor cheap in a circuit. Three ways out: bring blake3
+into the circuit from an external library (no format change, expensive); give
+attestations a second Poseidon2 id anchored alongside (32 more payload bytes and
+a domain-tag bump, cheap in-circuit); or re-key ids to Poseidon2 outright
+(cheapest, invalidates every chain anchored so far).
+
+That is a decision about kRep's attestation format rather than a circuit
+problem, so it is flagged rather than guessed at — the same way SPEC 1.5 flagged
+the unilateral-default problem that M2 then solved.
 
 ## Next
 
