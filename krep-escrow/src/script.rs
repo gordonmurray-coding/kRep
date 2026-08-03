@@ -28,6 +28,7 @@ use crate::state::{OFF_MAKER, OFF_PHASE, OFF_SHIPPED_AT, OFF_TERMS, OFF_TRACKING
 use crate::{state::Phase, Terms, TX_ID_KEY};
 use kaspa_txscript::opcodes::codes::*;
 use kaspa_txscript::script_builder::{ScriptBuilder, ScriptBuilderResult};
+use secp256k1::XOnlyPublicKey;
 
 /// Push the sequence that authenticates the supplied previous state.
 ///
@@ -287,6 +288,193 @@ pub fn settle_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     Ok(b.drain())
 }
 
+
+/// The `OPEN -> REFUND` transition: nobody claimed the job before the deadline.
+///
+/// Sig script: `<buyer_sig> <prev_rest> <prev_payload> <redeem>`.
+///
+/// No trade happened, so no reputation is produced and the payload must be
+/// empty — a refund is not a settlement and must not be able to masquerade as
+/// one by carrying attestation-shaped bytes.
+pub fn refund_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
+    let terms_id = terms.id();
+    let mut b = ScriptBuilder::new();
+    verify_prev_state(&mut b)?; // [sig, payload]
+    require_prev_phase_and_job(&mut b, Phase::Open, &terms_id)?;
+    b.add_op(OpDrop)?; // [sig]
+
+    b.add_i64(terms.deadline as i64)?.add_op(OpCheckLockTimeVerify)?;
+    b.add_data(&terms.buyer.serialize())?.add_op(OpCheckSigVerify)?; // []
+
+    b.add_op(OpTxPayloadLen)?.add_i64(0)?.add_op(OpNumEqualVerify)?;
+
+    b.add_data(&terms.buyer.serialize())?;
+    require_p2pk_output(&mut b, 0, terms.reward)?;
+    b.add_op(OpTrue)?;
+    Ok(b.drain())
+}
+
+/// The `CLAIMED -> SLASH` transition: the maker took the job and never shipped.
+///
+/// Sig script: `<buyer_sig> <prev_rest> <prev_payload> <redeem>`.
+///
+/// Reward *and* bond go to the buyer. This is the branch SPEC 1.5 calls the
+/// unilateral default path: the payload must carry the attestation ids, and
+/// because a defaulter will never co-sign their own default, the fact that this
+/// branch executed is what stands in for their signature. The covenant is the
+/// counter-signer of record.
+pub fn slash_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
+    let terms_id = terms.id();
+    let mut b = ScriptBuilder::new();
+    verify_prev_state(&mut b)?; // [sig, payload]
+    require_prev_phase_and_job(&mut b, Phase::Claimed, &terms_id)?;
+    b.add_op(OpDrop)?; // [sig]
+
+    b.add_i64(terms.deadline as i64)?.add_op(OpCheckLockTimeVerify)?;
+    b.add_data(&terms.buyer.serialize())?.add_op(OpCheckSigVerify)?; // []
+
+    b.add_op(OpTxPayloadLen)?.add_i64(TERMINAL_PAYLOAD_BYTES as i64)?.add_op(OpNumEqualVerify)?;
+
+    b.add_data(&terms.buyer.serialize())?;
+    require_p2pk_output(&mut b, 0, terms.claimed_value())?;
+    b.add_op(OpTrue)?;
+    Ok(b.drain())
+}
+
+/// The `SHIPPED -> SETTLED` auto-release: the buyer went quiet.
+///
+/// Sig script: `<maker_sig> <prev_rest> <prev_payload> <redeem>`.
+///
+/// The wait is a *relative* timelock on the SHIPPED output, so the clock starts
+/// when the job actually shipped and needs no arithmetic on the payload. Buyer
+/// silence must not hold a maker's bond hostage indefinitely.
+pub fn auto_release_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
+    let terms_id = terms.id();
+    let mut b = ScriptBuilder::new();
+    verify_prev_state(&mut b)?; // [sig, payload]
+    require_prev_phase_and_job(&mut b, Phase::Shipped, &terms_id)?;
+
+    b.add_i64(terms.auto_release_delay as i64)?.add_op(OpCheckSequenceVerify)?;
+
+    b.add_i64(OFF_MAKER as i64)?
+        .add_i64((OFF_MAKER + 32) as i64)?
+        .add_op(OpSubstr)? // [sig, maker]
+        .add_op(OpDup)? // [sig, maker, maker]
+        .add_op(OpRot)? // [maker, maker, sig]
+        .add_op(OpSwap)? // [maker, sig, maker]
+        .add_op(OpCheckSigVerify)?; // [maker]
+
+    b.add_op(OpTxPayloadLen)?.add_i64(TERMINAL_PAYLOAD_BYTES as i64)?.add_op(OpNumEqualVerify)?;
+    require_p2pk_output(&mut b, 0, terms.claimed_value())?;
+    b.add_op(OpTrue)?;
+    Ok(b.drain())
+}
+
+/// The `SHIPPED -> DISPUTED` transition: the buyer contests delivery.
+///
+/// Sig script: `<buyer_sig> <prev_rest> <prev_payload> <redeem>`.
+///
+/// Only available on an arbitrated job. In pure-timeout mode there is nobody to
+/// resolve a dispute, so allowing one would strand the escrow forever — the
+/// honest configuration is to have no dispute branch at all and let the
+/// auto-release timer govern, which is exactly the "lower trust ceiling" the
+/// spec attaches to running without an arbiter.
+pub fn dispute_branch(terms: &Terms) -> Option<ScriptBuilderResult<Vec<u8>>> {
+    terms.arbiter?;
+    Some(build_dispute(terms))
+}
+
+fn build_dispute(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
+    let terms_id = terms.id();
+    let mut b = ScriptBuilder::new();
+    verify_prev_state(&mut b)?; // [sig, payload]
+    require_prev_phase_and_job(&mut b, Phase::Shipped, &terms_id)?;
+
+    // Everything except the phase byte carries over untouched: same maker, same
+    // tracking hash, same ship time. A dispute contests the delivery, it does
+    // not get to rewrite what was delivered.
+    b.add_i64(OFF_MAKER as i64)?
+        .add_i64(STATE_BYTES as i64)?
+        .add_op(OpSubstr)? // [sig, tail]
+        .add_i64(OFF_MAKER as i64)?
+        .add_i64(STATE_BYTES as i64)?
+        .add_op(OpTxPayloadSubstr)?
+        .add_op(OpEqualVerify)?; // [sig]
+
+    b.add_data(&terms.buyer.serialize())?.add_op(OpCheckSigVerify)?; // []
+
+    b.add_op(OpTxPayloadLen)?.add_i64(STATE_BYTES as i64)?.add_op(OpNumEqualVerify)?;
+    require_new_field(&mut b, 0, OFF_TERMS, &header_for(Phase::Disputed))?;
+    require_new_field(&mut b, OFF_TERMS, OFF_TERMS + 32, &terms_id)?;
+
+    // Money stays put while the dispute is live.
+    b.add_op(OpTxInputIndex)?.add_op(OpTxInputSpk)?.add_i64(0)?.add_op(OpTxOutputSpk)?.add_op(OpEqualVerify)?;
+    b.add_i64(0)?
+        .add_op(OpTxOutputAmount)?
+        .add_op(OpTxInputIndex)?
+        .add_op(OpTxInputAmount)?
+        .add_op(OpNumEqual)?;
+    Ok(b.drain())
+}
+
+/// Who a resolved dispute pays.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// Arbiter sides with the maker: reward + bond to the maker.
+    ToMaker,
+    /// Arbiter sides with the buyer: reward + bond to the buyer, and the maker
+    /// takes the default.
+    ToBuyer,
+}
+
+/// `DISPUTED -> SETTLED | SLASH`, requiring the arbiter plus the beneficiary.
+///
+/// Sig script: `<beneficiary_sig> <arbiter_sig> <prev_rest> <prev_payload> <redeem>`.
+///
+/// This is the 2-of-3 of SPEC 2.3 reduced to the combinations that can actually
+/// move money: the arbiter alone cannot pay themselves, and neither party can
+/// resolve their own dispute. Buyer-plus-maker agreement is deliberately not a
+/// path here — two parties who agree never needed to dispute.
+pub fn resolve_branch(terms: &Terms, resolution: Resolution) -> Option<ScriptBuilderResult<Vec<u8>>> {
+    let arbiter = terms.arbiter?;
+    Some(build_resolve(terms, arbiter, resolution))
+}
+
+fn build_resolve(terms: &Terms, arbiter: XOnlyPublicKey, resolution: Resolution) -> ScriptBuilderResult<Vec<u8>> {
+    let terms_id = terms.id();
+    let mut b = ScriptBuilder::new();
+    verify_prev_state(&mut b)?; // [ben_sig, arb_sig, payload]
+    require_prev_phase_and_job(&mut b, Phase::Disputed, &terms_id)?;
+
+    b.add_i64(OFF_MAKER as i64)?
+        .add_i64((OFF_MAKER + 32) as i64)?
+        .add_op(OpSubstr)? // [ben_sig, arb_sig, maker]
+        .add_op(OpSwap)? // [ben_sig, maker, arb_sig]
+        .add_data(&arbiter.serialize())?
+        .add_op(OpCheckSigVerify)?; // [ben_sig, maker]
+
+    match resolution {
+        Resolution::ToMaker => {
+            // The maker is both the beneficiary and the second signer.
+            b.add_op(OpDup)? // [ben_sig, maker, maker]
+                .add_op(OpRot)? // [maker, maker, ben_sig]
+                .add_op(OpSwap)? // [maker, ben_sig, maker]
+                .add_op(OpCheckSigVerify)?; // [maker]
+        }
+        Resolution::ToBuyer => {
+            b.add_op(OpDrop)? // [ben_sig]
+                .add_data(&terms.buyer.serialize())?
+                .add_op(OpCheckSigVerify)? // []
+                .add_data(&terms.buyer.serialize())?; // [buyer]
+        }
+    }
+
+    b.add_op(OpTxPayloadLen)?.add_i64(TERMINAL_PAYLOAD_BYTES as i64)?.add_op(OpNumEqualVerify)?;
+    require_p2pk_output(&mut b, 0, terms.claimed_value())?;
+    b.add_op(OpTrue)?;
+    Ok(b.drain())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -369,6 +557,8 @@ mod tests {
         sequence: u64,
         /// Signed by, if the branch expects a signature argument.
         signer: Option<Keypair>,
+        /// Second signature, pushed *below* `signer` (arbiter paths).
+        cosigner: Option<Keypair>,
     }
 
     impl Spend {
@@ -382,6 +572,7 @@ mod tests {
                 lock_time: 0,
                 sequence: 0,
                 signer: None,
+                cosigner: None,
             }
         }
     }
@@ -391,10 +582,15 @@ mod tests {
         let spk = pay_to_script_hash_script(&spend.script);
         let (rest, payload, outpoint) = prior(&spk, &spend.prev_state, spend.prev_value);
 
-        let build_sig_script = |signature: Option<Vec<u8>>| {
+        // Args are pushed bottom-up: beneficiary sig, then arbiter sig, then
+        // the state pair, matching each branch's documented stack.
+        let build_sig_script = |sigs: Option<(Vec<u8>, Option<Vec<u8>>)>| {
             let mut b = ScriptBuilder::new();
-            if let Some(sig) = &signature {
-                b.add_data(sig).unwrap();
+            if let Some((primary, second)) = &sigs {
+                b.add_data(primary).unwrap();
+                if let Some(s2) = second {
+                    b.add_data(s2).unwrap();
+                }
             }
             b.add_data(&rest).unwrap().add_data(&payload).unwrap().add_data(&spend.script).unwrap().drain()
         };
@@ -427,9 +623,12 @@ mod tests {
                 let reused = SigHashReusedValuesUnsync::new();
                 let hash = calc_schnorr_signature_hash(&populated, 0, SIG_HASH_ALL, &reused);
                 let msg = secp256k1::Message::from_digest(hash.as_bytes());
-                let mut sig = k.sign_schnorr(msg).as_ref().to_vec();
-                sig.push(SIG_HASH_ALL.to_u8());
-                build_sig_script(Some(sig))
+                let sign = |kp: &Keypair| {
+                    let mut sig = kp.sign_schnorr(msg).as_ref().to_vec();
+                    sig.push(SIG_HASH_ALL.to_u8());
+                    sig
+                };
+                build_sig_script(Some((sign(k), spend.cosigner.as_ref().map(sign))))
             }
         };
 
@@ -692,5 +891,251 @@ mod tests {
         let mut from_claimed = settle_spend(&t, attestation_payload(), t.claimed_value(), p2pk(MAKER), BUYER);
         from_claimed.prev_state = claimed_state(&t);
         assert!(run(from_claimed).is_err(), "cannot release a job that never shipped");
+    }
+
+    // --------------------------------------------------------------- refund
+
+    fn disputed_state(t: &Terms) -> EscrowState {
+        EscrowState { phase: Phase::Disputed, ..shipped_state(t, 900) }
+    }
+
+    fn refund_spend(t: &Terms, lock_time: u64, out_value: u64, out_spk: ScriptPublicKey, signer: u8) -> Spend {
+        let mut s = Spend::new(refund_branch(t).unwrap(), open_state(t), t.reward);
+        s.outputs = vec![TransactionOutput { value: out_value, script_public_key: out_spk, covenant: None }];
+        s.lock_time = lock_time;
+        s.signer = Some(kp(signer));
+        s
+    }
+
+    #[test]
+    fn an_unclaimed_job_refunds_after_the_deadline() {
+        let t = terms();
+        run(refund_spend(&t, t.deadline, t.reward, p2pk(BUYER), BUYER)).expect("buyer must get their money back");
+    }
+
+    #[test]
+    fn refund_is_not_available_before_the_deadline() {
+        let t = terms();
+        assert!(
+            run(refund_spend(&t, t.deadline - 1, t.reward, p2pk(BUYER), BUYER)).is_err(),
+            "refunding early would let a buyer pull funding out from under a pending claim"
+        );
+    }
+
+    #[test]
+    fn only_the_buyer_can_refund_and_only_to_themselves() {
+        let t = terms();
+        assert!(run(refund_spend(&t, t.deadline, t.reward, p2pk(BUYER), STRANGER)).is_err(), "stranger refund");
+        assert!(run(refund_spend(&t, t.deadline, t.reward, p2pk(STRANGER), BUYER)).is_err(), "refund elsewhere");
+    }
+
+    #[test]
+    fn a_refund_cannot_masquerade_as_a_settlement() {
+        let t = terms();
+        // No trade happened, so a refund must not be able to carry attestation
+        // bytes that a naive verifier might read as reputation.
+        let mut with_payload = refund_spend(&t, t.deadline, t.reward, p2pk(BUYER), BUYER);
+        with_payload.new_payload = attestation_payload();
+        assert!(run(with_payload).is_err(), "refund payload must be empty");
+    }
+
+    // ---------------------------------------------------------------- slash
+
+    fn slash_spend(t: &Terms, lock_time: u64, out_value: u64, out_spk: ScriptPublicKey, signer: u8) -> Spend {
+        let mut s = Spend::new(slash_branch(t).unwrap(), claimed_state(t), t.claimed_value());
+        s.new_payload = attestation_payload();
+        s.outputs = vec![TransactionOutput { value: out_value, script_public_key: out_spk, covenant: None }];
+        s.lock_time = lock_time;
+        s.signer = Some(kp(signer));
+        s
+    }
+
+    #[test]
+    fn a_maker_who_never_ships_is_slashed_after_the_deadline() {
+        let t = terms();
+        run(slash_spend(&t, t.deadline, t.claimed_value(), p2pk(BUYER), BUYER))
+            .expect("reward and bond must both go to the buyer");
+    }
+
+    #[test]
+    fn slashing_is_not_available_before_the_deadline() {
+        let t = terms();
+        assert!(
+            run(slash_spend(&t, t.deadline - 1, t.claimed_value(), p2pk(BUYER), BUYER)).is_err(),
+            "a buyer must not be able to slash a maker who still has time to ship"
+        );
+    }
+
+    #[test]
+    fn only_the_buyer_can_slash_and_only_to_themselves() {
+        let t = terms();
+        assert!(run(slash_spend(&t, t.deadline, t.claimed_value(), p2pk(BUYER), MAKER)).is_err());
+        assert!(run(slash_spend(&t, t.deadline, t.claimed_value(), p2pk(MAKER), BUYER)).is_err());
+        assert!(run(slash_spend(&t, t.deadline, t.claimed_value(), p2pk(STRANGER), BUYER)).is_err());
+    }
+
+    #[test]
+    fn a_slash_must_carry_the_default_attestation() {
+        let t = terms();
+        // The unilateral default path: the defaulter will never co-sign, so the
+        // execution of this branch is what stands in for their signature. A
+        // slash that carried no attestation would destroy the maker's bond
+        // without recording why.
+        let mut bare = slash_spend(&t, t.deadline, t.claimed_value(), p2pk(BUYER), BUYER);
+        bare.new_payload = vec![];
+        assert!(run(bare).is_err(), "slash payload must carry the attestation ids");
+    }
+
+    #[test]
+    fn a_shipped_job_cannot_be_slashed() {
+        let t = terms();
+        let mut after_ship = slash_spend(&t, t.deadline, t.claimed_value(), p2pk(BUYER), BUYER);
+        after_ship.prev_state = shipped_state(&t, 900);
+        assert!(run(after_ship).is_err(), "shipping must protect the maker from the slash path");
+    }
+
+    // --------------------------------------------------------- auto-release
+
+    fn auto_spend(t: &Terms, sequence: u64, out_value: u64, out_spk: ScriptPublicKey, signer: u8) -> Spend {
+        let mut s = Spend::new(auto_release_branch(t).unwrap(), shipped_state(t, 900), t.claimed_value());
+        s.new_payload = attestation_payload();
+        s.outputs = vec![TransactionOutput { value: out_value, script_public_key: out_spk, covenant: None }];
+        s.sequence = sequence;
+        s.signer = Some(kp(signer));
+        s
+    }
+
+    #[test]
+    fn the_maker_can_auto_release_after_the_delay() {
+        let t = terms();
+        run(auto_spend(&t, t.auto_release_delay, t.claimed_value(), p2pk(MAKER), MAKER))
+            .expect("buyer silence must not hold the bond hostage forever");
+    }
+
+    #[test]
+    fn auto_release_waits_for_the_full_delay() {
+        let t = terms();
+        assert!(
+            run(auto_spend(&t, t.auto_release_delay - 1, t.claimed_value(), p2pk(MAKER), MAKER)).is_err(),
+            "the buyer's dispute window must not be cut short"
+        );
+        assert!(run(auto_spend(&t, 0, t.claimed_value(), p2pk(MAKER), MAKER)).is_err(), "no wait at all");
+    }
+
+    #[test]
+    fn only_the_maker_can_auto_release_and_only_to_themselves() {
+        let t = terms();
+        assert!(run(auto_spend(&t, t.auto_release_delay, t.claimed_value(), p2pk(MAKER), STRANGER)).is_err());
+        assert!(run(auto_spend(&t, t.auto_release_delay, t.claimed_value(), p2pk(STRANGER), MAKER)).is_err());
+    }
+
+    // -------------------------------------------------------------- dispute
+
+    fn dispute_spend(t: &Terms, new_state: EscrowState, signer: u8) -> Spend {
+        let script = dispute_branch(t).unwrap().unwrap();
+        let spk = pay_to_script_hash_script(&script);
+        let mut s = Spend::new(script, shipped_state(t, 900), t.claimed_value());
+        s.new_payload = new_state.encode().to_vec();
+        s.outputs = vec![TransactionOutput { value: t.claimed_value(), script_public_key: spk, covenant: None }];
+        s.signer = Some(kp(signer));
+        s
+    }
+
+    #[test]
+    fn the_buyer_can_dispute_a_shipment() {
+        let t = terms();
+        run(dispute_spend(&t, disputed_state(&t), BUYER)).expect("buyer must be able to contest delivery");
+    }
+
+    #[test]
+    fn only_the_buyer_can_dispute() {
+        let t = terms();
+        assert!(run(dispute_spend(&t, disputed_state(&t), MAKER)).is_err(), "maker must not dispute themselves");
+        assert!(run(dispute_spend(&t, disputed_state(&t), STRANGER)).is_err());
+    }
+
+    #[test]
+    fn disputing_cannot_rewrite_what_was_delivered() {
+        let t = terms();
+        // A dispute contests the delivery; it does not get to change who
+        // shipped, what they shipped, or when.
+        let mut swap_maker = disputed_state(&t);
+        swap_maker.maker = Some(key(STRANGER));
+        assert!(run(dispute_spend(&t, swap_maker, BUYER)).is_err(), "maker rewritten");
+
+        let mut swap_tracking = disputed_state(&t);
+        swap_tracking.tracking = Some([0xee; 32]);
+        assert!(run(dispute_spend(&t, swap_tracking, BUYER)).is_err(), "tracking hash rewritten");
+
+        let mut swap_time = disputed_state(&t);
+        swap_time.shipped_at = 1;
+        assert!(run(dispute_spend(&t, swap_time, BUYER)).is_err(), "ship time rewritten");
+    }
+
+    #[test]
+    fn pure_timeout_escrows_have_no_dispute_path() {
+        // With no arbiter there is nobody to resolve a dispute, so offering one
+        // would strand the escrow forever.
+        let t = Terms { arbiter: None, ..terms() };
+        assert!(dispute_branch(&t).is_none());
+        assert!(resolve_branch(&t, Resolution::ToMaker).is_none());
+        assert!(resolve_branch(&t, Resolution::ToBuyer).is_none());
+    }
+
+    // -------------------------------------------------------------- resolve
+
+    fn resolve_spend(t: &Terms, res: Resolution, out_spk: ScriptPublicKey, beneficiary: u8, arbiter: u8) -> Spend {
+        let mut s = Spend::new(resolve_branch(t, res).unwrap().unwrap(), disputed_state(t), t.claimed_value());
+        s.new_payload = attestation_payload();
+        s.outputs =
+            vec![TransactionOutput { value: t.claimed_value(), script_public_key: out_spk, covenant: None }];
+        s.signer = Some(kp(beneficiary));
+        s.cosigner = Some(kp(arbiter));
+        s
+    }
+
+    #[test]
+    fn an_arbiter_can_resolve_a_dispute_either_way() {
+        let t = terms();
+        run(resolve_spend(&t, Resolution::ToMaker, p2pk(MAKER), MAKER, ARBITER))
+            .expect("arbiter siding with the maker must pay the maker");
+        run(resolve_spend(&t, Resolution::ToBuyer, p2pk(BUYER), BUYER, ARBITER))
+            .expect("arbiter siding with the buyer must pay the buyer");
+    }
+
+    #[test]
+    fn resolution_needs_both_the_arbiter_and_the_beneficiary() {
+        let t = terms();
+        // Neither party can resolve their own dispute unilaterally...
+        assert!(
+            run(resolve_spend(&t, Resolution::ToMaker, p2pk(MAKER), MAKER, MAKER)).is_err(),
+            "maker must not stand in for the arbiter"
+        );
+        assert!(
+            run(resolve_spend(&t, Resolution::ToBuyer, p2pk(BUYER), BUYER, BUYER)).is_err(),
+            "buyer must not stand in for the arbiter"
+        );
+        // ...and the arbiter alone cannot move the money either.
+        assert!(
+            run(resolve_spend(&t, Resolution::ToMaker, p2pk(MAKER), ARBITER, ARBITER)).is_err(),
+            "arbiter alone must not resolve"
+        );
+    }
+
+    #[test]
+    fn a_resolution_cannot_pay_a_third_party() {
+        let t = terms();
+        assert!(run(resolve_spend(&t, Resolution::ToMaker, p2pk(STRANGER), MAKER, ARBITER)).is_err());
+        assert!(run(resolve_spend(&t, Resolution::ToBuyer, p2pk(STRANGER), BUYER, ARBITER)).is_err());
+        // And the arbiter cannot pay themselves.
+        assert!(run(resolve_spend(&t, Resolution::ToMaker, p2pk(ARBITER), MAKER, ARBITER)).is_err());
+    }
+
+    #[test]
+    fn resolution_only_applies_to_a_disputed_escrow() {
+        let t = terms();
+        let mut not_disputed = resolve_spend(&t, Resolution::ToMaker, p2pk(MAKER), MAKER, ARBITER);
+        not_disputed.prev_state = shipped_state(&t, 900);
+        assert!(run(not_disputed).is_err(), "cannot resolve a dispute that was never raised");
     }
 }
