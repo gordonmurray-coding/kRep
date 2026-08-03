@@ -134,12 +134,28 @@ The loop has been run end to end against a synced mainnet node (2026-08):
 | fee | 169,900 sompi (mass 1699 at feerate 100) |
 | result | both chains `"anchor_status": "verified"`, one trade scored on each side |
 
-The predicted txid matched the broadcast one exactly, and verification takes
-~25s (a full pruning-point-to-tip scan).
+The predicted txid matched the broadcast one exactly.
 
-Negative control: an identically co-signed chain naming a *real but unspent*
-outpoint is rejected with "attestation not anchored on-chain" and exit code 1.
-Nothing spent it, so nothing anchors it — which is the whole point.
+Both transports were exercised against this anchor:
+
+| transport | node | verify time |
+|---|---|---|
+| `grpc://` | own node, LAN | ~25s |
+| `wss://` (borsh wRPC) | unrelated public node | ~51s |
+
+The wRPC run matters beyond transport coverage: a node that has never seen any
+of our data independently confirmed both chains. That is the entire claim of
+portable pseudonymous reputation — anyone can check it, and checking needs
+nothing but a Kaspa node.
+
+Negative control, on both transports: an identically co-signed chain naming a
+*real but unspent* outpoint is rejected with "attestation not anchored
+on-chain" and exit code 1. Nothing spent it, so nothing anchors it — which is
+the whole point.
+
+Verification cost is dominated by the pruning-point-to-tip scan. `--scan-from`
+with a recent chain block cuts it sharply when you know roughly when the
+settlement happened.
 
 ## Next
 
