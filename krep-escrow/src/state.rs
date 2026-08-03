@@ -15,11 +15,19 @@ use thiserror::Error;
 ///      4     1  version
 ///      5     1  phase
 ///      6    32  terms id      — binds the state to the job it belongs to
-///     38    32  maker         — zero while OPEN
-///     70    32  tracking hash — zero unless SHIPPED
-///    102     8  shipped_at    — DAA score at SHIPPED, for the auto-release clock
+///     38    32  maker         — payment key, paid on settlement. Zero while OPEN
+///     70    32  maker_rep     — reputation pseudonym. Zero while OPEN
+///    102    32  tracking hash — zero unless SHIPPED
+///    134     8  shipped_at    — DAA score at SHIPPED, for the auto-release clock
 /// ```
-pub const STATE_BYTES: usize = 110;
+///
+/// Payment key and pseudonym are separate on purpose. If the key the covenant
+/// pays were also the identity reputation accrues to, a maker could take a
+/// fresh key for every job and never carry a default — which would make "0
+/// defaults" unfalsifiable. The pseudonym is what a default lands on, and the
+/// claim branch requires a signature from it, so it cannot be set to somebody
+/// else's identity.
+pub const STATE_BYTES: usize = 142;
 
 pub const MAGIC: [u8; 4] = *b"kESC";
 pub const VERSION: u8 = 1;
@@ -29,8 +37,9 @@ pub const OFF_VERSION: usize = 4;
 pub const OFF_PHASE: usize = 5;
 pub const OFF_TERMS: usize = 6;
 pub const OFF_MAKER: usize = 38;
-pub const OFF_TRACKING: usize = 70;
-pub const OFF_SHIPPED_AT: usize = 102;
+pub const OFF_MAKER_REP: usize = 70;
+pub const OFF_TRACKING: usize = 102;
+pub const OFF_SHIPPED_AT: usize = 134;
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum StateError {
@@ -79,8 +88,11 @@ impl Phase {
 pub struct EscrowState {
     pub phase: Phase,
     pub terms_id: [u8; 32],
-    /// Set once the job is claimed; zero while OPEN.
+    /// Payment key, paid on settlement. Set once the job is claimed.
     pub maker: Option<XOnlyPublicKey>,
+    /// Reputation pseudonym the maker's chain entries belong to, and the
+    /// identity a default is recorded against.
+    pub maker_rep: Option<XOnlyPublicKey>,
     /// Carrier tracking number hash, set at SHIPPED.
     pub tracking: Option<[u8; 32]>,
     /// DAA score recorded at SHIPPED — the auto-release clock starts here.
@@ -89,7 +101,14 @@ pub struct EscrowState {
 
 impl EscrowState {
     pub fn open(terms_id: [u8; 32]) -> Self {
-        EscrowState { phase: Phase::Open, terms_id, maker: None, tracking: None, shipped_at: 0 }
+        EscrowState {
+            phase: Phase::Open,
+            terms_id,
+            maker: None,
+            maker_rep: None,
+            tracking: None,
+            shipped_at: 0,
+        }
     }
 
     pub fn encode(&self) -> [u8; STATE_BYTES] {
@@ -100,6 +119,9 @@ impl EscrowState {
         out[OFF_TERMS..OFF_TERMS + 32].copy_from_slice(&self.terms_id);
         if let Some(m) = &self.maker {
             out[OFF_MAKER..OFF_MAKER + 32].copy_from_slice(&m.serialize());
+        }
+        if let Some(r) = &self.maker_rep {
+            out[OFF_MAKER_REP..OFF_MAKER_REP + 32].copy_from_slice(&r.serialize());
         }
         if let Some(t) = &self.tracking {
             out[OFF_TRACKING..OFF_TRACKING + 32].copy_from_slice(t);
@@ -130,6 +152,16 @@ impl EscrowState {
             Some(XOnlyPublicKey::from_slice(maker_bytes).map_err(|_| StateError::Malformed("maker is not a valid x-only pubkey"))?)
         };
 
+        let rep_bytes = &bytes[OFF_MAKER_REP..OFF_MAKER_REP + 32];
+        let maker_rep = if rep_bytes == [0u8; 32] {
+            None
+        } else {
+            Some(
+                XOnlyPublicKey::from_slice(rep_bytes)
+                    .map_err(|_| StateError::Malformed("maker_rep is not a valid x-only pubkey"))?,
+            )
+        };
+
         let tracking_bytes = &bytes[OFF_TRACKING..OFF_TRACKING + 32];
         let tracking = if tracking_bytes == [0u8; 32] {
             None
@@ -141,7 +173,8 @@ impl EscrowState {
 
         let mut sa = [0u8; 8];
         sa.copy_from_slice(&bytes[OFF_SHIPPED_AT..OFF_SHIPPED_AT + 8]);
-        let state = EscrowState { phase, terms_id, maker, tracking, shipped_at: u64::from_le_bytes(sa) };
+        let state =
+            EscrowState { phase, terms_id, maker, maker_rep, tracking, shipped_at: u64::from_le_bytes(sa) };
         state.check_invariants()?;
         Ok(state)
     }
@@ -152,7 +185,7 @@ impl EscrowState {
     pub fn check_invariants(&self) -> Result<(), StateError> {
         match self.phase {
             Phase::Open => {
-                if self.maker.is_some() {
+                if self.maker.is_some() || self.maker_rep.is_some() {
                     return Err(StateError::Malformed("OPEN escrow cannot name a maker"));
                 }
                 if self.tracking.is_some() || self.shipped_at != 0 {
@@ -163,12 +196,15 @@ impl EscrowState {
                 if self.maker.is_none() {
                     return Err(StateError::Malformed("CLAIMED escrow must name a maker"));
                 }
+                if self.maker_rep.is_none() {
+                    return Err(StateError::Malformed("CLAIMED escrow must name a maker pseudonym"));
+                }
                 if self.tracking.is_some() || self.shipped_at != 0 {
                     return Err(StateError::Malformed("CLAIMED escrow cannot be shipped"));
                 }
             }
             Phase::Shipped | Phase::Disputed => {
-                if self.maker.is_none() {
+                if self.maker.is_none() || self.maker_rep.is_none() {
                     return Err(StateError::Malformed("shipped escrow must name a maker"));
                 }
                 if self.tracking.is_none() {
@@ -211,6 +247,7 @@ mod tests {
             phase: Phase::Shipped,
             terms_id: [3u8; 32],
             maker: Some(key(5)),
+            maker_rep: Some(key(6)),
             tracking: Some([9u8; 32]),
             shipped_at: 12_345,
         }
@@ -220,7 +257,12 @@ mod tests {
     fn round_trips_through_the_payload_encoding() {
         for state in [
             EscrowState::open([1u8; 32]),
-            EscrowState { phase: Phase::Claimed, maker: Some(key(5)), ..EscrowState::open([2u8; 32]) },
+            EscrowState {
+                phase: Phase::Claimed,
+                maker: Some(key(5)),
+                maker_rep: Some(key(6)),
+                ..EscrowState::open([2u8; 32])
+            },
             shipped(),
             EscrowState { phase: Phase::Disputed, ..shipped() },
         ] {
@@ -241,6 +283,7 @@ mod tests {
         assert_eq!(b[OFF_PHASE], Phase::Shipped.byte());
         assert_eq!(&b[OFF_TERMS..OFF_TERMS + 32], &[3u8; 32]);
         assert_eq!(&b[OFF_MAKER..OFF_MAKER + 32], &key(5).serialize());
+        assert_eq!(&b[OFF_MAKER_REP..OFF_MAKER_REP + 32], &key(6).serialize());
         assert_eq!(&b[OFF_TRACKING..OFF_TRACKING + 32], &[9u8; 32]);
         assert_eq!(&b[OFF_SHIPPED_AT..OFF_SHIPPED_AT + 8], &12_345u64.to_le_bytes());
     }
@@ -273,9 +316,21 @@ mod tests {
         assert!(matches!(EscrowState::decode(&sneaky), Err(StateError::Malformed(_))));
 
         // CLAIMED with no maker — would leave the bond unattributable.
-        let mut no_maker = EscrowState { phase: Phase::Claimed, maker: Some(key(5)), ..EscrowState::open([1u8; 32]) }.encode();
+        let claimed = EscrowState {
+            phase: Phase::Claimed,
+            maker: Some(key(5)),
+            maker_rep: Some(key(6)),
+            ..EscrowState::open([1u8; 32])
+        };
+        let mut no_maker = claimed.encode();
         no_maker[OFF_MAKER..OFF_MAKER + 32].copy_from_slice(&[0u8; 32]);
         assert!(matches!(EscrowState::decode(&no_maker), Err(StateError::Malformed(_))));
+
+        // CLAIMED with no pseudonym — nothing for a default to land on, which
+        // would let a maker escape one by simply omitting it.
+        let mut no_rep = claimed.encode();
+        no_rep[OFF_MAKER_REP..OFF_MAKER_REP + 32].copy_from_slice(&[0u8; 32]);
+        assert!(matches!(EscrowState::decode(&no_rep), Err(StateError::Malformed(_))));
 
         // SHIPPED with no tracking hash, or no shipped_at: the auto-release
         // clock would start from zero and the maker could release instantly.
@@ -291,7 +346,12 @@ mod tests {
     #[test]
     fn only_the_state_machine_edges_are_legal() {
         let open = EscrowState::open([1u8; 32]);
-        let claimed = EscrowState { phase: Phase::Claimed, maker: Some(key(5)), ..EscrowState::open([1u8; 32]) };
+        let claimed = EscrowState {
+            phase: Phase::Claimed,
+            maker: Some(key(5)),
+            maker_rep: Some(key(6)),
+            ..EscrowState::open([1u8; 32])
+        };
         let ship = shipped();
 
         assert!(open.may_transition_to(Phase::Claimed).is_ok());

@@ -274,11 +274,13 @@ pub async fn claim(
     terms: &Terms,
     live: &Live,
     maker: secp256k1::XOnlyPublicKey,
+    rep: &Keypair,
 ) -> Result<(Transaction, Live)> {
     let state = EscrowState {
         phase: Phase::Claimed,
         terms_id: terms.id(),
         maker: Some(maker),
+        maker_rep: Some(rep.x_only_public_key().0),
         tracking: None,
         shipped_at: 0,
     };
@@ -290,7 +292,8 @@ pub async fn claim(
         terms,
         live,
         Branch::Claim,
-        vec![],
+        // The pseudonym signs its own binding to this escrow.
+        vec![*rep],
         terms.maker_bond,
         move |_, _| vec![TransactionOutput { value: claimed_value, script_public_key: esc.clone(), covenant: None }],
         state.encode().to_vec(),
@@ -306,9 +309,10 @@ pub async fn ship(
     key: &Keypair,
     terms: &Terms,
     live: &Live,
-    maker: secp256k1::XOnlyPublicKey,
     tracking: [u8; 32],
 ) -> Result<(Transaction, Live)> {
+    let prev = EscrowState::decode(&hex::decode(&live.prev_payload)?)
+        .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
     // `shipped_at` must equal the transaction's own lock time, and consensus
     // will not include a transaction before its lock time, so the value is a
     // lower bound on the real shipping moment rather than a claim we trust.
@@ -323,7 +327,8 @@ pub async fn ship(
     let state = EscrowState {
         phase: Phase::Shipped,
         terms_id: terms.id(),
-        maker: Some(maker),
+        maker: prev.maker,
+        maker_rep: prev.maker_rep,
         tracking: Some(tracking),
         shipped_at: now,
     };
@@ -497,14 +502,20 @@ pub fn amount_bucket(reward: u64) -> u8 {
     }
 }
 
-/// The escrow identities *are* the reputation identities here: the covenant
-/// names a buyer in its terms and a maker in its state, and those are the
-/// pubkeys whose chains the settlement feeds. Splitting payment identity from
-/// reputation identity would need a separate binding, which the spec does not
-/// yet define.
+/// The four identities an escrow involves: two payment keys, which sign
+/// transitions and receive payouts, and two reputation pseudonyms, which own
+/// the chain entries.
+///
+/// Keeping them apart is what makes per-context pseudonyms survive trading. It
+/// also closes a hole: if reputation accrued to the payment key, a maker could
+/// take a fresh key for every job and never carry a default. The covenant binds
+/// the pseudonym at claim time and requires a signature from it, so it is
+/// neither optional nor forgeable.
 pub struct Parties {
     pub maker: secp256k1::XOnlyPublicKey,
+    pub maker_rep: secp256k1::XOnlyPublicKey,
     pub buyer: secp256k1::XOnlyPublicKey,
+    pub buyer_rep: secp256k1::XOnlyPublicKey,
 }
 
 pub fn parties(terms: &Terms, live: &Live) -> Result<Parties> {
@@ -512,7 +523,9 @@ pub fn parties(terms: &Terms, live: &Live) -> Result<Parties> {
         .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
     Ok(Parties {
         maker: state.maker.ok_or_else(|| anyhow!("escrow names no maker yet"))?,
+        maker_rep: state.maker_rep.ok_or_else(|| anyhow!("escrow names no maker pseudonym yet"))?,
         buyer: terms.buyer,
+        buyer_rep: terms.buyer_rep,
     })
 }
 
@@ -566,11 +579,13 @@ pub fn default_attestation(
     ts: u64,
 ) -> Result<krep_core::Attestation> {
     let p = parties(terms, live)?;
+    // The default is recorded against the pseudonym, not the payment key —
+    // otherwise a maker escapes it by using a fresh key next time.
     let body = settlement_body(
         terms,
         live,
-        p.maker,
-        p.buyer,
+        p.maker_rep,
+        p.buyer_rep,
         krep_core::Role::Provider,
         krep_core::Outcome::Default,
         prev,
@@ -580,7 +595,7 @@ pub fn default_attestation(
     let witness = krep_core::CovenantWitness {
         redeem_script: covenant_script(terms).map_err(|e| anyhow!("{e}"))?,
         branch: Branch::Slash as u8,
-        owner_offset: krep_escrow::state::OFF_MAKER as u16,
+        owner_offset: krep_escrow::state::OFF_MAKER_REP as u16,
     };
     let att = krep_core::Attestation {
         body,

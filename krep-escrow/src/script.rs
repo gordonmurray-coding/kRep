@@ -24,7 +24,7 @@
 //! `blake2b("TransactionID", rest ‖ payload)` and checking it against the
 //! outpoint being spent. Only then does it trust the previous state.
 
-use crate::state::{OFF_MAKER, OFF_PHASE, OFF_SHIPPED_AT, OFF_TERMS, OFF_TRACKING, STATE_BYTES};
+use crate::state::{OFF_MAKER, OFF_MAKER_REP, OFF_PHASE, OFF_SHIPPED_AT, OFF_TERMS, OFF_TRACKING, STATE_BYTES};
 use crate::{state::Phase, Terms, TX_ID_KEY};
 use kaspa_txscript::opcodes::codes::*;
 use kaspa_txscript::script_builder::{ScriptBuilder, ScriptBuilderResult};
@@ -68,35 +68,34 @@ fn require_new_field(b: &mut ScriptBuilder, start: usize, end: usize, want: &[u8
 
 /// The `OPEN -> CLAIMED` transition.
 ///
-/// Enforces, in order: the previous state is genuinely OPEN and belongs to this
-/// job; the new state is a well-formed CLAIMED record for the same job with a
-/// non-zero maker and nothing shipped; the escrow continues to the same
-/// covenant at output 0; and the escrow's value grows by exactly the bond.
+/// Sig script: `<maker_rep_sig> <prev_rest> <prev_payload> <redeem>`.
 ///
-/// The maker is not authenticated. It does not need to be: claiming costs the
-/// bond, and whoever pays it names the pubkey that will be paid on settlement
-/// and slashed on default. Claiming "as" someone else means funding their job.
+/// Enforces, in order: the previous state is genuinely OPEN and belongs to this
+/// job; the claimant controls the pseudonym they are binding to it; the new
+/// state is a well-formed CLAIMED record for the same job with nothing shipped;
+/// the escrow continues to the same covenant at output 0; and the escrow's
+/// value grows by exactly the bond.
+///
+/// The *payment* key is not authenticated, and does not need to be: claiming
+/// costs the bond, and whoever pays it names the key that gets paid. The
+/// *pseudonym* is authenticated, and must be — it is the identity a default
+/// lands on, so an unauthenticated one would let a maker name a rival's
+/// pseudonym and then default on their behalf.
 pub fn claim_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     let terms_id = terms.id();
     let mut b = builder();
 
-    verify_prev_state(&mut b)?;
+    verify_prev_state(&mut b)?; // [rep_sig, payload]
+    require_prev_phase_and_job(&mut b, Phase::Open, &terms_id)?;
+    b.add_op(OpDrop)?; // [rep_sig]
 
-    // Previous phase must be OPEN.
-    b.add_op(OpDup)?
-        .add_i64(OFF_PHASE as i64)?
-        .add_i64((OFF_PHASE + 1) as i64)?
-        .add_op(OpSubstr)?
-        .add_data(&[Phase::Open.byte()])?
-        .add_op(OpEqualVerify)?;
-
-    // Previous state must belong to this job. Without this an attacker could
-    // splice in the OPEN state of a different, cheaper escrow.
-    b.add_i64(OFF_TERMS as i64)?
-        .add_i64((OFF_TERMS + 32) as i64)?
-        .add_op(OpSubstr)?
-        .add_data(&terms_id)?
-        .add_op(OpEqualVerify)?;
+    // The claimant must control the pseudonym they are binding to this escrow.
+    // The key is read out of the *new* state, so the signature proves whoever
+    // wrote that field holds it.
+    b.add_i64(OFF_MAKER_REP as i64)?
+        .add_i64((OFF_MAKER_REP + 32) as i64)?
+        .add_op(OpTxPayloadSubstr)?
+        .add_op(OpCheckSigVerify)?; // []
 
     // New state: exact length, then field by field.
     b.add_op(OpTxPayloadLen)?.add_i64(STATE_BYTES as i64)?.add_op(OpNumEqualVerify)?;
@@ -108,9 +107,9 @@ pub fn claim_branch(terms: &Terms) -> ScriptBuilderResult<Vec<u8>> {
     require_new_field(&mut b, 0, OFF_TERMS, &header)?;
     require_new_field(&mut b, OFF_TERMS, OFF_TERMS + 32, &terms_id)?;
 
-    // The maker field must not be all zeros, or the escrow would be CLAIMED by
-    // nobody — the bond would be unattributable and the slash path would have
-    // no one to blame.
+    // The payment key must not be all zeros, or the escrow would be CLAIMED by
+    // nobody and the settlement would have no one to pay. (The pseudonym is
+    // already pinned by the signature check above — a zero key cannot sign.)
     b.add_i64(OFF_MAKER as i64)?
         .add_i64((OFF_MAKER + 32) as i64)?
         .add_op(OpTxPayloadSubstr)?
@@ -591,13 +590,16 @@ mod tests {
     }
 
     const BUYER: u8 = 1;
+    const BUYER_REP: u8 = 8;
     const ARBITER: u8 = 2;
     const MAKER: u8 = 5;
+    const MAKER_REP: u8 = 6;
     const STRANGER: u8 = 9;
 
     fn terms() -> Terms {
         Terms {
             buyer: key(BUYER),
+            buyer_rep: key(BUYER_REP),
             arbiter: Some(key(ARBITER)),
             reward: 500_000_000,
             maker_bond: 100_000_000,
@@ -753,13 +755,21 @@ mod tests {
         EscrowState::open(t.id())
     }
     fn claimed_state(t: &Terms) -> EscrowState {
-        EscrowState { phase: Phase::Claimed, terms_id: t.id(), maker: Some(key(MAKER)), tracking: None, shipped_at: 0 }
+        EscrowState {
+            phase: Phase::Claimed,
+            terms_id: t.id(),
+            maker: Some(key(MAKER)),
+            maker_rep: Some(key(MAKER_REP)),
+            tracking: None,
+            shipped_at: 0,
+        }
     }
     fn shipped_state(t: &Terms, at: u64) -> EscrowState {
         EscrowState {
             phase: Phase::Shipped,
             terms_id: t.id(),
             maker: Some(key(MAKER)),
+            maker_rep: Some(key(MAKER_REP)),
             tracking: Some([0xcc; 32]),
             shipped_at: at,
         }
@@ -768,6 +778,7 @@ mod tests {
     fn claim_spend(t: &Terms, new_state: EscrowState, out_value: u64, out_spk: Option<ScriptPublicKey>) -> Spend {
         let spk = out_spk.unwrap_or_else(|| escrow_spk(t).unwrap());
         let mut s = Spend::new(Branch::Claim, t, open_state(t), t.reward);
+        s.signer = Some(kp(MAKER_REP));
         s.new_payload = new_state.encode().to_vec();
         s.outputs = vec![TransactionOutput { value: out_value, script_public_key: spk, covenant: None }];
         s
@@ -819,6 +830,33 @@ mod tests {
         let mut swapped = claimed_state(&t);
         swapped.terms_id = Terms { reward: 1, ..terms() }.id();
         assert!(run(claim_spend(&t, swapped, t.claimed_value(), None)).is_err());
+    }
+
+    #[test]
+    fn a_claim_must_prove_it_controls_the_pseudonym_it_binds() {
+        let t = terms();
+        // The pseudonym is the identity a default lands on. If naming one did
+        // not require holding it, a maker could bind a rival's pseudonym, walk
+        // away, and have the default recorded against them instead.
+        let mut impostor = claim_spend(&t, claimed_state(&t), t.claimed_value(), None);
+        impostor.signer = Some(kp(STRANGER));
+        assert!(run(impostor).is_err(), "claiming under someone else's pseudonym must fail");
+
+        // Signing with the *payment* key is not enough either — they are
+        // deliberately different identities.
+        let mut wrong_key = claim_spend(&t, claimed_state(&t), t.claimed_value(), None);
+        wrong_key.signer = Some(kp(MAKER));
+        assert!(run(wrong_key).is_err(), "the payment key cannot stand in for the pseudonym");
+    }
+
+    #[test]
+    fn a_claim_must_name_a_pseudonym() {
+        let t = terms();
+        let mut anonymous = claimed_state(&t);
+        anonymous.maker_rep = None; // encodes as 32 zero bytes
+        // A zero key cannot sign, so this fails at the signature check — which
+        // is exactly the property that stops a maker opting out of defaults.
+        assert!(run(claim_spend(&t, anonymous, t.claimed_value(), None)).is_err());
     }
 
     #[test]

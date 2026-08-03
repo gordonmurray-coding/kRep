@@ -224,6 +224,22 @@ krep escrow settle --escrow job.json --wallet buyer.key --id <att> --id <att> --
 paths. Resolution takes two signatures — `--wallet` for the beneficiary and
 `--arbiter-key` for the arbiter.
 
+### Payment keys and pseudonyms are different identities
+
+An escrow binds four identities: a payment key and a reputation pseudonym for
+each side. The covenant pays the payment key and records the pseudonym; chain
+entries belong to the pseudonym.
+
+The separation is not decoration. If reputation accrued to the key the covenant
+pays, a maker could take a fresh key for every job and never carry a default —
+"0 defaults" would be unfalsifiable. It would also mean per-context pseudonyms
+collapse into one linkable identity the moment you trade.
+
+So the claim branch requires a signature **from the pseudonym being bound**.
+That makes it neither optional (a zero key cannot sign, and the state
+invariants reject an unnamed one) nor forgeable (a maker cannot bind a rival's
+pseudonym and then default on their behalf).
+
 ### Reputation as a side effect
 
 The escrow already knows every fact an attestation needs — who traded, in which
@@ -231,11 +247,12 @@ role, against which outpoint, for what size — so it derives them rather than
 asking:
 
 ```bash
-# both sides derive the same pair of bodies from the escrow, and co-sign
-krep escrow attest --escrow job.json --wallet maker.key --chain m.chain.json > m.part.json
-krep escrow attest --escrow job.json --wallet buyer.key --chain b.chain.json > b.part.json
-krep countersign --wallet buyer.key < m.part.json > m.att.json
-krep countersign --wallet maker.key < b.part.json > b.att.json
+# both sides derive the same pair of bodies from the escrow, and co-sign.
+# `attest` takes the pseudonym, not the key that paid.
+krep escrow attest --escrow job.json --seed maker.seed --context fabmesh --chain m.chain.json > m.part.json
+krep escrow attest --escrow job.json --seed buyer.seed --context fabmesh --chain b.chain.json > b.part.json
+krep countersign --seed buyer.seed --context fabmesh < m.part.json > m.att.json
+krep countersign --seed maker.seed --context fabmesh < b.part.json > b.att.json
 
 krep escrow settle --escrow job.json --wallet buyer.key --att m.att.json --att b.att.json --submit
 ```
@@ -251,9 +268,11 @@ signatures:
 krep escrow slash --escrow job.json --wallet buyer.key --default-out default.json --submit
 ```
 
-Both were run on testnet-10: a settlement where each side's chain verified from
-the one transaction, and a slash whose derived default verified and scored
-`defaults 1` against a maker who signed nothing. Without `--submit`
+Both were run on testnet-10 with four genuinely distinct identities: a
+settlement where each side's chain verified from the one transaction and landed
+on their *pseudonyms*, and a slash whose derived default verified against the
+maker's pseudonym — the identity they cannot swap out between jobs — rather than
+the payment key they can. Without `--submit`
 nothing is sent and the state file is left untouched, so a dry run cannot
 desynchronise the client from the chain.
 

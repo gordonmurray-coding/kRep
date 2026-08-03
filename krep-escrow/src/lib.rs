@@ -97,9 +97,15 @@ mod hex32_serde {
 /// therefore into the escrow address.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Terms {
-    /// Funds the job and receives the refund/slash.
+    /// Funds the job, signs its transitions, and receives the refund/slash.
     #[serde(with = "xonly_hex")]
     pub buyer: XOnlyPublicKey,
+    /// The buyer's reputation pseudonym — the identity their chain entries
+    /// belong to. Separate from `buyer` so a participant's payment key and
+    /// their reputation are not forced to be the same identity, which would
+    /// make per-context pseudonyms pointless the moment they traded.
+    #[serde(with = "xonly_hex")]
+    pub buyer_rep: XOnlyPublicKey,
     /// Optional per-job arbiter for the 2-of-3 dispute path. `None` runs the
     /// escrow in pure-timeout mode — a lower trust ceiling with zero third
     /// parties, which is a legitimate configuration, not a degraded one.
@@ -127,9 +133,10 @@ impl Terms {
     /// discipline as [`krep_core::AttestationBody::canonical_bytes`], and for
     /// the same reason: this is what gets committed, not any JSON rendering.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(1 + 32 + 33 + 8 + 8 + 8 + 8 + 32);
+        let mut out = Vec::with_capacity(1 + 32 + 32 + 33 + 8 + 8 + 8 + 8 + 32);
         out.push(1u8); // version
         out.extend_from_slice(&self.buyer.serialize());
+        out.extend_from_slice(&self.buyer_rep.serialize());
         match &self.arbiter {
             Some(a) => {
                 out.push(1);
@@ -190,6 +197,7 @@ mod tests {
     fn terms() -> Terms {
         Terms {
             buyer: key(1),
+            buyer_rep: key(3),
             arbiter: Some(key(2)),
             reward: 500_000_000,
             maker_bond: 100_000_000,
@@ -229,6 +237,10 @@ mod tests {
         assert_ne!(id, t.id(), "buyer must bind");
 
         let mut t = base.clone();
+        t.buyer_rep = key(9);
+        assert_ne!(id, t.id(), "buyer pseudonym must bind");
+
+        let mut t = base.clone();
         t.arbiter = Some(key(9));
         assert_ne!(id, t.id(), "arbiter must bind");
 
@@ -245,21 +257,21 @@ mod tests {
         let mut a = terms();
         a.arbiter = None;
         assert!(!a.arbitrated());
-        assert_eq!(a.canonical_bytes()[33], 0, "absence flag");
+        assert_eq!(a.canonical_bytes()[65], 0, "absence flag");
 
         let b = terms();
         assert!(b.arbitrated());
-        assert_eq!(b.canonical_bytes()[33], 1, "presence flag");
+        assert_eq!(b.canonical_bytes()[65], 1, "presence flag");
         assert_ne!(a.id(), b.id());
     }
 
     #[test]
     fn canonical_bytes_are_fixed_width() {
-        // 1 version + 32 buyer + 1 flag + 32 arbiter + 8*4 + 32 file hash
-        assert_eq!(terms().canonical_bytes().len(), 130);
+        // 1 version + 32 buyer + 32 buyer_rep + 1 flag + 32 arbiter + 8*4 + 32 file hash
+        assert_eq!(terms().canonical_bytes().len(), 162);
         let mut t = terms();
         t.arbiter = None;
-        assert_eq!(t.canonical_bytes().len(), 130, "absent arbiter still occupies its slot");
+        assert_eq!(t.canonical_bytes().len(), 162, "absent arbiter still occupies its slot");
     }
 
     #[test]

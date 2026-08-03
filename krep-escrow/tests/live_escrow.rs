@@ -27,7 +27,7 @@ use kaspa_rpc_core::api::rpc::RpcApi;
 use kaspa_txscript::script_builder::ScriptBuilder;
 use kaspa_txscript::{pay_to_address_script, EngineFlags};
 use krep_escrow::script::{covenant_script, escrow_address, escrow_spk, Branch};
-use krep_escrow::state::{EscrowState, Phase, OFF_MAKER};
+use krep_escrow::state::{EscrowState, Phase, OFF_MAKER_REP};
 use krep_escrow::Terms;
 use secp256k1::{Keypair, Secp256k1, XOnlyPublicKey};
 use std::sync::Arc;
@@ -75,6 +75,18 @@ struct CovenantUnlock {
 /// transaction, so every signature script is filled in after the sighashes are
 /// computed against a skeleton.
 fn build_tx(key: &Keypair, ins: &[In], outs: Vec<TransactionOutput>, payload: Vec<u8>, lock_time: u64) -> Transaction {
+    build_tx_with(key, None, ins, outs, payload, lock_time)
+}
+
+/// `covenant_key`, when given, signs covenant inputs instead of `key`.
+fn build_tx_with(
+    key: &Keypair,
+    covenant_key: Option<&Keypair>,
+    ins: &[In],
+    outs: Vec<TransactionOutput>,
+    payload: Vec<u8>,
+    lock_time: u64,
+) -> Transaction {
     let skeleton = |scripts: Vec<Vec<u8>>| {
         Transaction::new(
             0,
@@ -100,10 +112,10 @@ fn build_tx(key: &Keypair, ins: &[In], outs: Vec<TransactionOutput>, payload: Ve
     let populated = PopulatedTransaction::new(&empty, entries);
     let reused = SigHashReusedValuesUnsync::new();
 
-    let sign_input = |idx: usize| {
+    let sign_input = |idx: usize, k: &Keypair| {
         let hash = calc_schnorr_signature_hash(&populated, idx, SIG_HASH_ALL, &reused);
         let msg = secp256k1::Message::from_digest(hash.as_bytes());
-        let mut sig = key.sign_schnorr(msg).as_ref().to_vec();
+        let mut sig = k.sign_schnorr(msg).as_ref().to_vec();
         sig.push(SIG_HASH_ALL.to_u8());
         sig
     };
@@ -112,11 +124,11 @@ fn build_tx(key: &Keypair, ins: &[In], outs: Vec<TransactionOutput>, payload: Ve
         .iter()
         .enumerate()
         .map(|(idx, i)| match &i.covenant {
-            None => builder().add_data(&sign_input(idx)).unwrap().drain(),
+            None => builder().add_data(&sign_input(idx, key)).unwrap().drain(),
             Some(c) => {
                 let mut b = builder();
                 if c.needs_sig {
-                    b.add_data(&sign_input(idx)).unwrap();
+                    b.add_data(&sign_input(idx, covenant_key.unwrap_or(key))).unwrap();
                 }
                 b.add_data(&c.prev_rest)
                     .unwrap()
@@ -186,14 +198,21 @@ fn escrow_slash_produces_an_unrepudiable_default() {
 
         // The wallet plays buyer; the maker is a pseudonym that will default.
         let buyer = key.x_only_public_key().0;
-        let maker: XOnlyPublicKey =
+        // Payment key and reputation pseudonym are different identities. The
+        // default lands on the pseudonym, which is what a maker cannot swap out
+        // between jobs.
+        let maker_payment: XOnlyPublicKey =
             Keypair::from_seckey_slice(&Secp256k1::new(), &[0x4d; 32]).unwrap().x_only_public_key().0;
+        let maker_rep_key = Keypair::from_seckey_slice(&Secp256k1::new(), &[0x5e; 32]).unwrap();
+        let maker: XOnlyPublicKey = maker_rep_key.x_only_public_key().0;
         let wallet_addr = kaspa_addresses::Address::new(prefix, kaspa_addresses::Version::PubKey, &buyer.serialize());
         let wallet_spk = pay_to_address_script(&wallet_addr);
 
         // Deadline already in the past, so the slash path is open immediately.
+        let buyer_rep_key = Keypair::from_seckey_slice(&Secp256k1::new(), &[0x6f; 32]).unwrap();
         let terms = Terms {
             buyer,
+            buyer_rep: buyer_rep_key.x_only_public_key().0,
             arbiter: None,
             reward: REWARD,
             maker_bond: BOND,
@@ -232,13 +251,15 @@ fn escrow_slash_produces_an_unrepudiable_default() {
         let claimed = EscrowState {
             phase: Phase::Claimed,
             terms_id: terms.id(),
-            maker: Some(maker),
+            maker: Some(maker_payment),
+            maker_rep: Some(maker),
             tracking: None,
             shipped_at: 0,
         };
         let change_value = entry.amount - REWARD - FEE;
-        let tx_claim = build_tx(
+        let tx_claim = build_tx_with(
             &key,
+            Some(&maker_rep_key),
             &[
                 In {
                     outpoint: TransactionOutpoint::new(tx_open.id(), 0),
@@ -247,7 +268,8 @@ fn escrow_slash_produces_an_unrepudiable_default() {
                         branch: Branch::Claim,
                         prev_rest: rest,
                         prev_payload: payload,
-                        needs_sig: false,
+                        // The pseudonym must sign its own binding to the escrow.
+                        needs_sig: true,
                         script: script.clone(),
                     }),
                 },
@@ -280,14 +302,14 @@ fn escrow_slash_produces_an_unrepudiable_default() {
         let witness = krep_core::CovenantWitness {
             redeem_script: script.clone(),
             branch: Branch::Slash as u8,
-            owner_offset: OFF_MAKER as u16,
+            owner_offset: OFF_MAKER_REP as u16,
         };
         let body = krep_core::AttestationBody {
             v: 1,
             anchor,
             role: krep_core::Role::Provider,
             owner: maker,
-            counterparty: buyer,
+            counterparty: buyer_rep_key.x_only_public_key().0,
             outcome: krep_core::Outcome::Default,
             amount_bucket: 1,
             prev: None,

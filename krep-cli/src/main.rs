@@ -262,6 +262,13 @@ enum EscrowCmd {
         /// Buyer x-only pubkey, hex. Defaults to the wallet's own key.
         #[arg(long)]
         buyer: Option<String>,
+        /// The buyer's reputation pseudonym — the identity their chain entries
+        /// belong to. Kept separate from the payment key so trading does not
+        /// collapse per-context pseudonyms into one linkable identity.
+        #[arg(long, requires = "buyer_context")]
+        buyer_seed: Option<PathBuf>,
+        #[arg(long)]
+        buyer_context: Option<String>,
         /// Optional arbiter. Without one the escrow runs in pure-timeout mode
         /// and has no dispute path at all.
         #[arg(long)]
@@ -307,9 +314,16 @@ enum EscrowCmd {
         escrow: PathBuf,
         #[arg(long)]
         wallet: PathBuf,
-        /// Maker x-only pubkey to record. Defaults to the wallet's own key.
+        /// Maker payment key to record. Defaults to the wallet's own key.
         #[arg(long)]
         maker: Option<String>,
+        /// The maker's reputation pseudonym. The covenant requires a signature
+        /// from it, so a maker cannot bind someone else's identity — nor omit
+        /// one and thereby dodge any future default.
+        #[arg(long, requires = "rep_context")]
+        rep_seed: PathBuf,
+        #[arg(long)]
+        rep_context: Option<String>,
         #[arg(long)]
         rpc: Option<String>,
         #[arg(long)]
@@ -336,9 +350,12 @@ enum EscrowCmd {
     Attest {
         #[arg(long)]
         escrow: PathBuf,
-        /// The party's key — the same one the escrow names.
+        /// The party's reputation pseudonym — the identity the escrow bound,
+        /// not the key that paid.
+        #[arg(long, requires = "context")]
+        seed: PathBuf,
         #[arg(long)]
-        wallet: PathBuf,
+        context: Option<String>,
         /// That party's chain, to position the entry.
         #[arg(long)]
         chain: Option<PathBuf>,
@@ -638,14 +655,34 @@ fn escrow_session(rpc: &Option<String>) -> Result<RpcSession> {
 
 fn run_escrow(cmd: EscrowCmd) -> Result<()> {
     match cmd {
-        EscrowCmd::New { out, buyer, arbiter, reward, bond, deadline, auto_release, file_hash, wallet } => {
+        EscrowCmd::New {
+            out,
+            buyer,
+            buyer_seed,
+            buyer_context,
+            arbiter,
+            reward,
+            bond,
+            deadline,
+            auto_release,
+            file_hash,
+            wallet,
+        } => {
             let buyer = match (&buyer, &wallet) {
                 (Some(b), _) => parse_xonly(b)?,
                 (None, Some(w)) => load_wallet(w)?.x_only_public_key().0,
                 (None, None) => bail!("pass --buyer <pubkey> or --wallet <file>"),
             };
+            let buyer_rep = match (&buyer_seed, &buyer_context) {
+                (Some(s), Some(c)) => load_keypair(s, c)?.x_only_public_key().0,
+                _ => bail!(
+                    "pass --buyer-seed and --buyer-context: the buyer's reputation pseudonym is \
+                     deliberately not the same key that pays"
+                ),
+            };
             let terms = krep_escrow::Terms {
                 buyer,
+                buyer_rep,
                 arbiter: arbiter.as_deref().map(parse_xonly).transpose()?,
                 reward,
                 maker_bond: bond,
@@ -678,7 +715,7 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
             let (tx, live) = s.rt.block_on(escrow::open(&s.client, &key, &f.terms))?;
             finish(&s, &mut f, &path, tx, live, submit, "OPEN")?;
         }
-        EscrowCmd::Claim { escrow: path, wallet, maker, rpc, submit } => {
+        EscrowCmd::Claim { escrow: path, wallet, maker, rep_seed, rep_context, rpc, submit } => {
             let mut f = escrow::load(&path)?;
             let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
             let key = load_wallet(&wallet)?;
@@ -686,8 +723,10 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
                 Some(m) => parse_xonly(m)?,
                 None => key.x_only_public_key().0,
             };
+            let ctx = rep_context.ok_or_else(|| anyhow!("--rep-context is required"))?;
+            let rep = load_keypair(&rep_seed, &ctx)?;
             let s = escrow_session(&rpc)?;
-            let (tx, next) = s.rt.block_on(escrow::claim(&s.client, &key, &f.terms, live, maker))?;
+            let (tx, next) = s.rt.block_on(escrow::claim(&s.client, &key, &f.terms, live, maker, &rep))?;
             finish(&s, &mut f, &path, tx, next, submit, "CLAIM")?;
         }
         EscrowCmd::Ship { escrow: path, wallet, tracking, rpc, submit } => {
@@ -695,25 +734,30 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
             let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
             let key = load_wallet(&wallet)?;
             let s = escrow_session(&rpc)?;
-            let maker = key.x_only_public_key().0;
             let (tx, next) =
-                s.rt.block_on(escrow::ship(&s.client, &key, &f.terms, live, maker, parse_id(&tracking)?))?;
+                s.rt.block_on(escrow::ship(&s.client, &key, &f.terms, live, parse_id(&tracking)?))?;
             finish(&s, &mut f, &path, tx, next, submit, "SHIP")?;
         }
-        EscrowCmd::Attest { escrow: path, wallet, chain, ts } => {
+        EscrowCmd::Attest { escrow: path, seed, context, chain, ts } => {
             let f = escrow::load(&path)?;
             let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
-            let key = load_wallet(&wallet)?;
+            let ctx = context.ok_or_else(|| anyhow!("--context is required"))?;
+            let key = load_keypair(&seed, &ctx)?;
             let me = key.x_only_public_key().0;
             let p = escrow::parties(&f.terms, live)?;
-            // Which side of the trade this key is on decides the role, and the
-            // escrow decides everything else.
-            let (counterparty, role) = if me == p.maker {
-                (p.buyer, Role::Provider)
-            } else if me == p.buyer {
-                (p.maker, Role::Client)
+            // Which side of the trade this pseudonym is on decides the role,
+            // and the escrow decides everything else.
+            let (counterparty, role) = if me == p.maker_rep {
+                (p.buyer_rep, Role::Provider)
+            } else if me == p.buyer_rep {
+                (p.maker_rep, Role::Client)
             } else {
-                bail!("this key is neither the buyer nor the maker of that escrow");
+                bail!(
+                    "that pseudonym is not bound to this escrow — the covenant names {} (maker) \
+                     and {} (buyer)",
+                    hex::encode(p.maker_rep.serialize()),
+                    hex::encode(p.buyer_rep.serialize())
+                );
             };
             let (prev, index) = match &chain {
                 Some(c) if c.exists() => {
@@ -753,9 +797,9 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
                 }
                 ids.push(att.id());
             }
-            let state = krep_escrow::state::EscrowState::decode(&hex::decode(&live.prev_payload)?)
-                .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
-            let maker = state.maker.ok_or_else(|| anyhow!("escrow has no maker to pay"))?;
+            // The payout goes to the payment key; the attestations above belong
+            // to the pseudonyms. Two different jobs, two different identities.
+            let maker = escrow::parties(&f.terms, live)?.maker;
             let s = escrow_session(&rpc)?;
             let (tx, next) = s.rt.block_on(escrow::payout(
                 &s.client,
@@ -819,14 +863,10 @@ fn run_escrow(cmd: EscrowCmd) -> Result<()> {
             let key = load_wallet(&wallet)?;
             let arbiter = load_wallet(&arbiter_key)?;
             let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
-            let state = krep_escrow::state::EscrowState::decode(&hex::decode(&live.prev_payload)?)
-                .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
+            let p = escrow::parties(&f.terms, live)?;
             let (branch, beneficiary) = match to {
-                ResolveTo::Maker => (
-                    krep_escrow::script::Branch::ResolveToMaker,
-                    state.maker.ok_or_else(|| anyhow!("escrow has no maker"))?,
-                ),
-                ResolveTo::Buyer => (krep_escrow::script::Branch::ResolveToBuyer, f.terms.buyer),
+                ResolveTo::Maker => (krep_escrow::script::Branch::ResolveToMaker, p.maker),
+                ResolveTo::Buyer => (krep_escrow::script::Branch::ResolveToBuyer, p.buyer),
             };
             let s = escrow_session(&rpc)?;
             // Beneficiary first, arbiter above it — the order the branch reads.
