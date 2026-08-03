@@ -36,6 +36,7 @@
 
 pub mod script;
 pub mod state;
+pub mod tx;
 
 pub use state::{EscrowState, Phase, StateError, STATE_BYTES};
 
@@ -45,15 +46,64 @@ use secp256k1::XOnlyPublicKey;
 /// Domain tag for the escrow terms commitment.
 pub const TERMS_DOMAIN: &str = "krep/escrow/v1/terms";
 
+mod xonly_hex {
+    use secp256k1::XOnlyPublicKey;
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &XOnlyPublicKey, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(v.serialize()))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<XOnlyPublicKey, D::Error> {
+        let s = String::deserialize(d)?;
+        let b = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        XOnlyPublicKey::from_slice(&b).map_err(serde::de::Error::custom)
+    }
+    pub mod opt {
+        use secp256k1::XOnlyPublicKey;
+        use serde::{Deserialize, Deserializer, Serializer};
+        pub fn serialize<S: Serializer>(v: &Option<XOnlyPublicKey>, s: S) -> Result<S::Ok, S::Error> {
+            match v {
+                Some(k) => s.serialize_some(&hex::encode(k.serialize())),
+                None => s.serialize_none(),
+            }
+        }
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<XOnlyPublicKey>, D::Error> {
+            let s: Option<String> = Option::deserialize(d)?;
+            match s {
+                None => Ok(None),
+                Some(s) => {
+                    let b = hex::decode(&s).map_err(serde::de::Error::custom)?;
+                    Ok(Some(XOnlyPublicKey::from_slice(&b).map_err(serde::de::Error::custom)?))
+                }
+            }
+        }
+    }
+}
+
+mod hex32_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    pub fn serialize<S: Serializer>(v: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(v))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+        let s = String::deserialize(d)?;
+        hex::decode(&s)
+            .map_err(serde::de::Error::custom)?
+            .try_into()
+            .map_err(|_| serde::de::Error::custom("expected 32 bytes"))
+    }
+}
+
 /// The immutable half of an escrow: baked into the covenant script, and
 /// therefore into the escrow address.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Terms {
     /// Funds the job and receives the refund/slash.
+    #[serde(with = "xonly_hex")]
     pub buyer: XOnlyPublicKey,
     /// Optional per-job arbiter for the 2-of-3 dispute path. `None` runs the
     /// escrow in pure-timeout mode — a lower trust ceiling with zero third
     /// parties, which is a legitimate configuration, not a degraded one.
+    #[serde(with = "xonly_hex::opt", default)]
     pub arbiter: Option<XOnlyPublicKey>,
     /// Paid to the maker on settlement, in sompi.
     pub reward: u64,
@@ -68,6 +118,7 @@ pub struct Terms {
     /// Protects the maker from a buyer who simply goes quiet.
     pub auto_release_delay: u64,
     /// blake3 of the design file — the job's identity.
+    #[serde(with = "hex32_serde")]
     pub file_hash: [u8; 32],
 }
 

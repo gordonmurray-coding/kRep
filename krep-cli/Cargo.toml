@@ -26,3 +26,5 @@ kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", tag = 
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
 kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+krep-escrow = { path = "../krep-escrow" }
+serde = { version = "1", features = ["derive"] }

@@ -15,6 +15,7 @@
 //!   krep score  --chain mychain.json --rpc grpc://node:16110
 
 mod anchor;
+mod escrow;
 mod rpc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -208,6 +209,11 @@ enum Cmd {
         #[arg(long)]
         fee_rate: Option<f64>,
     },
+    /// Drive a FabMesh escrow covenant.
+    Escrow {
+        #[command(subcommand)]
+        cmd: EscrowCmd,
+    },
     /// Broadcast a signed transaction written by `krep anchor --out`.
     Submit {
         #[arg(long)]
@@ -215,6 +221,123 @@ enum Cmd {
         /// kaspad endpoint. Falls back to $KREP_RPC.
         #[arg(long)]
         rpc: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum EscrowCmd {
+    /// Write an escrow definition. The address commits to every term here.
+    New {
+        #[arg(long)]
+        out: PathBuf,
+        /// Buyer x-only pubkey, hex. Defaults to the wallet's own key.
+        #[arg(long)]
+        buyer: Option<String>,
+        /// Optional arbiter. Without one the escrow runs in pure-timeout mode
+        /// and has no dispute path at all.
+        #[arg(long)]
+        arbiter: Option<String>,
+        #[arg(long)]
+        reward: u64,
+        #[arg(long)]
+        bond: u64,
+        /// Absolute DAA score after which refund and slash become available.
+        #[arg(long)]
+        deadline: u64,
+        /// DAA scores the maker must wait after shipping before auto-releasing.
+        #[arg(long, default_value_t = 1000)]
+        auto_release: u64,
+        /// blake3 of the design file, hex.
+        #[arg(long)]
+        file_hash: String,
+        /// Wallet whose key is the default buyer.
+        #[arg(long)]
+        wallet: Option<PathBuf>,
+    },
+    /// Print the escrow address and terms.
+    Show {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long, default_value = "mainnet")]
+        network: String,
+    },
+    /// Fund the escrow (buyer).
+    Open {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Claim the job, posting the bond (maker).
+    Claim {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Maker x-only pubkey to record. Defaults to the wallet's own key.
+        #[arg(long)]
+        maker: Option<String>,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Attest a tracking hash (maker).
+    Ship {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Hash of the carrier tracking number, hex.
+        #[arg(long)]
+        tracking: String,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Release reward + bond to the maker (buyer).
+    Settle {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Attestation id to commit, hex. Repeat for the mirror.
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Take reward + bond after a maker fails to ship (buyer).
+    Slash {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long)]
+        wallet: PathBuf,
+        /// Attestation id to commit, hex. Repeat for the mirror.
+        #[arg(long = "id", required = true)]
+        ids: Vec<String>,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
+    },
+    /// Reclaim an unclaimed job after the deadline (buyer).
+    Refund {
+        #[arg(long)]
+        escrow: PathBuf,
+        #[arg(long)]
+        wallet: PathBuf,
+        #[arg(long)]
+        rpc: Option<String>,
+        #[arg(long)]
+        submit: bool,
     },
 }
 
@@ -392,6 +515,162 @@ fn mirror_body(att: &Attestation, prev: Option<[u8; 32]>, index: u64) -> Result<
     })
 }
 
+fn parse_xonly(s: &str) -> Result<secp256k1::XOnlyPublicKey> {
+    let b = hex::decode(s.trim()).context("bad pubkey hex")?;
+    Ok(secp256k1::XOnlyPublicKey::from_slice(&b)?)
+}
+
+/// Submit a built escrow transition, or explain what was not sent.
+fn finish(
+    session: &RpcSession,
+    file: &mut escrow::EscrowFile,
+    path: &std::path::Path,
+    tx: kaspa_consensus_core::tx::Transaction,
+    live: escrow::Live,
+    submit: bool,
+    what: &str,
+) -> Result<()> {
+    eprintln!("{what}: {} sompi -> {}", live.value, live.outpoint);
+    if !submit {
+        eprintln!(
+            "NOT submitted. Re-run with --submit to broadcast. The escrow state file is left \\
+             untouched, so nothing is recorded until the chain has it."
+        );
+        println!("{}", tx.id());
+        return Ok(());
+    }
+    let txid = session.rt.block_on(anchor::submit_rpc_tx(&session.client, (&tx).into()))?;
+    file.live = Some(live);
+    escrow::save(path, file)?;
+    eprintln!("SUBMITTED — escrow state written to {}", path.display());
+    println!("{txid}");
+    Ok(())
+}
+
+fn escrow_session(rpc: &Option<String>) -> Result<RpcSession> {
+    let url = rpc::endpoint(rpc).ok_or_else(|| {
+        anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
+    })?;
+    open_rpc(&url)
+}
+
+fn run_escrow(cmd: EscrowCmd) -> Result<()> {
+    match cmd {
+        EscrowCmd::New { out, buyer, arbiter, reward, bond, deadline, auto_release, file_hash, wallet } => {
+            let buyer = match (&buyer, &wallet) {
+                (Some(b), _) => parse_xonly(b)?,
+                (None, Some(w)) => load_wallet(w)?.x_only_public_key().0,
+                (None, None) => bail!("pass --buyer <pubkey> or --wallet <file>"),
+            };
+            let terms = krep_escrow::Terms {
+                buyer,
+                arbiter: arbiter.as_deref().map(parse_xonly).transpose()?,
+                reward,
+                maker_bond: bond,
+                deadline,
+                auto_release_delay: auto_release,
+                file_hash: parse_id(&file_hash)?,
+            };
+            if out.exists() {
+                bail!("{} already exists", out.display());
+            }
+            escrow::save(&out, &escrow::EscrowFile { terms, live: None })?;
+            eprintln!("escrow definition written to {}", out.display());
+        }
+        EscrowCmd::Show { escrow: path, network } => {
+            let f = escrow::load(&path)?;
+            let net = NetworkType::from_str(&network).map_err(|e| anyhow!("bad --network: {e}"))?;
+            println!("{}", escrow::describe(&f.terms, net.into())?);
+            match &f.live {
+                Some(l) => println!("phase    {} at {} ({} sompi)", l.phase, l.outpoint, l.value),
+                None => println!("phase    not yet opened"),
+            }
+        }
+        EscrowCmd::Open { escrow: path, wallet, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            if f.live.is_some() {
+                bail!("this escrow is already open");
+            }
+            let key = load_wallet(&wallet)?;
+            let s = escrow_session(&rpc)?;
+            let (tx, live) = s.rt.block_on(escrow::open(&s.client, &key, &f.terms))?;
+            finish(&s, &mut f, &path, tx, live, submit, "OPEN")?;
+        }
+        EscrowCmd::Claim { escrow: path, wallet, maker, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let maker = match &maker {
+                Some(m) => parse_xonly(m)?,
+                None => key.x_only_public_key().0,
+            };
+            let s = escrow_session(&rpc)?;
+            let (tx, next) = s.rt.block_on(escrow::claim(&s.client, &key, &f.terms, live, maker))?;
+            finish(&s, &mut f, &path, tx, next, submit, "CLAIM")?;
+        }
+        EscrowCmd::Ship { escrow: path, wallet, tracking, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let s = escrow_session(&rpc)?;
+            let maker = key.x_only_public_key().0;
+            let (tx, next) =
+                s.rt.block_on(escrow::ship(&s.client, &key, &f.terms, live, maker, parse_id(&tracking)?))?;
+            finish(&s, &mut f, &path, tx, next, submit, "SHIP")?;
+        }
+        EscrowCmd::Settle { escrow: path, wallet, ids, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
+            let state = krep_escrow::state::EscrowState::decode(&hex::decode(&live.prev_payload)?)
+                .map_err(|e| anyhow!("cannot read escrow state: {e}"))?;
+            let maker = state.maker.ok_or_else(|| anyhow!("escrow has no maker to pay"))?;
+            let s = escrow_session(&rpc)?;
+            let (tx, next) = s.rt.block_on(escrow::payout(
+                &s.client,
+                &key,
+                &f.terms,
+                live,
+                krep_escrow::script::Branch::Settle,
+                maker,
+                &ids,
+                0,
+            ))?;
+            finish(&s, &mut f, &path, tx, next, submit, "SETTLE")?;
+        }
+        EscrowCmd::Slash { escrow: path, wallet, ids, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let ids: Vec<[u8; 32]> = ids.iter().map(|s| parse_id(s)).collect::<Result<_>>()?;
+            let deadline = f.terms.deadline;
+            let buyer = f.terms.buyer;
+            let s = escrow_session(&rpc)?;
+            let (tx, next) = s.rt.block_on(escrow::payout(
+                &s.client,
+                &key,
+                &f.terms,
+                live,
+                krep_escrow::script::Branch::Slash,
+                buyer,
+                &ids,
+                deadline,
+            ))?;
+            finish(&s, &mut f, &path, tx, next, submit, "SLASH")?;
+        }
+        EscrowCmd::Refund { escrow: path, wallet, rpc, submit } => {
+            let mut f = escrow::load(&path)?;
+            let live = f.live.as_ref().ok_or_else(|| anyhow!("escrow is not open yet"))?;
+            let key = load_wallet(&wallet)?;
+            let s = escrow_session(&rpc)?;
+            let (tx, next) = s.rt.block_on(escrow::refund(&s.client, &key, &f.terms, live))?;
+            finish(&s, &mut f, &path, tx, next, submit, "REFUND")?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().cmd {
         Cmd::Keygen { out } => {
@@ -552,6 +831,7 @@ fn main() -> Result<()> {
                 println!("{}:{}\t{} sompi", outpoint.transaction_id, outpoint.index, entry.amount);
             }
         }
+        Cmd::Escrow { cmd } => run_escrow(cmd)?,
         Cmd::Submit { tx, rpc: rpc_url } => {
             let raw = fs::read_to_string(&tx).with_context(|| format!("reading {}", tx.display()))?;
             let signed = anchor::from_json(&raw)?;

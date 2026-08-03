@@ -207,6 +207,39 @@ slash, refund — is exercised against the real script VM, and all of them share
 one address via a branch selector. Dispute paths are omitted entirely when no
 arbiter is configured, rather than present-but-unresolvable.
 
+### Driving an escrow
+
+```bash
+krep escrow new  --out job.json --wallet wallet.key \
+  --reward 100000000 --bond 50000000 --deadline <daa> --file-hash <blake3>
+krep escrow show --escrow job.json --network testnet
+
+krep escrow open   --escrow job.json --wallet buyer.key --rpc <url> --submit   # buyer funds
+krep escrow claim  --escrow job.json --wallet maker.key --rpc <url> --submit   # maker bonds
+krep escrow ship   --escrow job.json --wallet maker.key --tracking <hash> --rpc <url> --submit
+krep escrow settle --escrow job.json --wallet buyer.key --id <att> --id <att> --rpc <url> --submit
+```
+
+`slash` and `refund` replace `settle` on the failure paths. Without `--submit`
+nothing is sent and the state file is left untouched, so a dry run cannot
+desynchronise the client from the chain.
+
+The client keeps an escrow state file because a covenant spend must prove which
+state it is spending from, which means supplying the previous transaction's
+bytes — and kaspad has no transaction index, so recovering those from the chain
+would mean a full scan per command. Every participant already knows their own
+escrow's history; the file is a cache of what they watched happen, and the chain
+stays the authority.
+
+Full happy path, run on testnet-10 through these commands:
+
+| | |
+|---|---|
+| OPEN | `f324a61c5ac771405d40fb3a454d8f5414d64c38665fcf8964a5a937efe1ab72` |
+| CLAIM | `2ad9984b8218fb70a3d7798da6414c82eb0afc37852374d1468753ba8cc8813a` |
+| SHIP | `5812766cd8c2c131c479b7243619c4753b239cac12ac933c396285afaf9c7822` |
+| SETTLE | `23b037e6f4e780bf1a95e16c760897f8b2dac361632e3bf9bac4ce3195fe2436` |
+
 ### The unilateral default, driven on testnet-10
 
 SPEC 1.5 flags "0 defaults" as an open problem: a defaulter will not co-sign

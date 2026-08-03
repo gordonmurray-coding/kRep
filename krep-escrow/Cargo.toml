@@ -10,6 +10,7 @@ krep-core = { path = "../krep-core" }
 blake3 = "1"
 hex = "0.4"
 thiserror = "1"
+serde = { version = "1", features = ["derive"] }
 
 kaspa-consensus-core = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
 kaspa-txscript = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1" }
