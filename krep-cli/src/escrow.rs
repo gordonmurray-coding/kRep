@@ -154,6 +154,30 @@ pub async fn open(rpc: &Arc<dyn RpcApi>, key: &Keypair, terms: &Terms) -> Result
     let esc_spk = escrow_spk(terms).map_err(|e| anyhow!("building covenant: {e}"))?;
     let fee = covenant_fee(rpc).await;
 
+    // A deadline that will not arrive is not a deadline. Refund and slash are
+    // the buyer's only exits from an escrow nobody settles, and both are gated
+    // on it — set it out of reach and the funds are locked for good.
+    let dag = rpc.get_block_dag_info().await.map_err(|e| anyhow!("get_block_dag_info: {e}"))?;
+    let now = dag.virtual_daa_score;
+    if terms.deadline <= now {
+        eprintln!(
+            "WARNING: deadline {} has already passed (chain is at {now}) — this escrow can be \
+             refunded or slashed immediately",
+            terms.deadline
+        );
+    } else {
+        // 10 BPS puts a year at roughly 315 million DAA scores.
+        let years = (terms.deadline - now) as f64 / 315_000_000.0;
+        if years > 2.0 {
+            eprintln!(
+                "WARNING: deadline {} is ~{:.0} years away at 10 BPS. Until it passes there \
+                 is no refund and no slash, so if the job is never settled these funds stay \
+                 locked. Set a deadline you would actually be willing to wait for.",
+                terms.deadline, years
+            );
+        }
+    }
+
     let (op, entry) = utxos
         .into_iter()
         .filter(|(_, e)| e.amount > terms.reward + fee * 3)

@@ -388,9 +388,47 @@ and an acceptance pointing at a funded testnet escrow — published, read back a
 verified. `relay.damus.io` returned 503 while `nos.lol` accepted, which is
 exactly why publishing is multi-relay and reports per-relay verdicts.
 
+## M4 — dogfood run (in progress)
+
+A real job is live on testnet-10 and a public relay, and every digital step has
+been run end to end:
+
+| step | result |
+|---|---|
+| buyer funds escrow | `ac356778f0c3d2cb0365a942f8471d7d032486a4b6b21d865b2bbd0ddf8f0f20` |
+| buyer posts job | `30402:c85c8b84…:fabmesh-bracket-1785733724` on `nos.lol` |
+| maker verifies posting against the escrow | reward, bond, deadline, file hash all agree |
+| **buyer scores the maker's chain** | `verified · 1 trade · 0 defaults · diversity 1.0` |
+| buyer accepts | acceptance published, naming the funded escrow |
+| maker bonds in | `1d9a11921a6bd13ea2d53aa614af0128ec6f40cd5f97a9d34f6b387e0acb0335` |
+
+The escrow now holds reward + bond and names the maker's pseudonym. What
+remains is physical: print `bracket.scad`, ship it, then `escrow ship` with the
+real tracking number hashed, and `escrow settle` to mint both sides'
+reputation.
+
+That fourth row is the point of the whole project. The buyer chose a maker by
+scoring a reputation chain anchored in Kaspa transactions the maker could not
+forge, could not omit from, and did not have to be trusted about.
+
+### What this run taught
+
+The deadline was set to a DAA score that will never arrive. Refund and slash are
+the buyer's only exits from an escrow nobody settles, and both are gated on the
+deadline — so an unreachable one means the funds are locked permanently. There
+is no covenant path out of that. `escrow open` now warns when a deadline is
+implausibly far off, but the real lesson is that the deadline is a safety
+parameter, not paperwork.
+
+The shipping address had to be exchanged out of band: NIP-17 encrypted DMs are
+not implemented, and they are the one part of the flow that genuinely cannot be
+public.
+
 ## Next
 
-1. M4 — the dogfood run: one real end-to-end job through a physical printer.
+1. Finish the dogfood run's physical half.
+2. NIP-17 DMs, so the address and file key stop being out of band.
+3. M5 — rep explorer: paste a chain head, get a verified score.
 
 ## Deliberate design points (don't "fix" these)
 
