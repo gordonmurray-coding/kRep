@@ -460,10 +460,41 @@ the maker's inbox recovered both the message and the true sender from the inner
 seal, and the buyer's own inbox showed nothing, since a wrap is readable only by
 its addressee.
 
+## M5 — reputation explorer
+
+```bash
+krep serve --rpc grpc://node:16110        # http://127.0.0.1:8080
+```
+
+Paste a counterparty's chain; get a verified score breakdown.
+
+It runs on your machine and binds to loopback. A hosted explorer would be a
+server of record — you would be trusting its operator's word about whether a
+chain is anchored, which is exactly the trust this project exists to remove. So
+verification uses the same code path as `krep verify`, against your node, and
+the page renders a verdict you reached yourself rather than a claim someone made
+to you.
+
+Four verdicts, kept distinct because they mean very different things:
+
+| verdict | meaning |
+|---|---|
+| **Not a chain** | not a valid attestation chain file |
+| **Chain is broken** | signatures or the hash-linked order do not hold |
+| **Not proven on-chain** | well-formed, but an entry is not anchored in a settled transaction |
+| **Anchored and verified** | every entry committed in a settled Kaspa transaction |
+
+The breakdown surfaces two things a raw score does not. **Concentration** — a
+handful of counterparties across many trades is flagged, because a small circle
+trading with itself manufactures real cost but not independent endorsement.
+And **covenant-witnessed entries** are marked `unsigned`: defaults nobody
+signed, which the subject could not refuse or omit.
+
 ## Next
 
 1. Finish the dogfood run's physical half.
-2. M5 — rep explorer: paste a chain head, get a verified score.
+2. M6 — Noir circuit for selective disclosure (SPEC 1.5), using the anchored
+   chains from M1-M4 as test data.
 
 ## Deliberate design points (don't "fix" these)
 

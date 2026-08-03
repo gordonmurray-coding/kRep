@@ -17,6 +17,7 @@
 mod anchor;
 mod board;
 mod escrow;
+mod explore;
 mod rpc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -242,6 +243,16 @@ enum Cmd {
     Escrow {
         #[command(subcommand)]
         cmd: EscrowCmd,
+    },
+    /// Serve the reputation explorer locally.
+    ///
+    /// Verification happens here, against your node — a hosted explorer would
+    /// be a server of record, which is the trust this project exists to remove.
+    Serve {
+        #[arg(long, default_value = "127.0.0.1:8080")]
+        listen: String,
+        #[command(flatten)]
+        rpc: RpcOpts,
     },
     /// Broadcast a signed transaction written by `krep anchor --out`.
     Submit {
@@ -1406,6 +1417,32 @@ fn main() -> Result<()> {
             for (outpoint, entry) in &utxos {
                 println!("{}:{}\t{} sompi", outpoint.transaction_id, outpoint.index, entry.amount);
             }
+        }
+        Cmd::Serve { listen, rpc: opts } => {
+            if opts.offline {
+                bail!("the explorer verifies anchoring; --offline would make it a viewer of unproven claims");
+            }
+            let url = rpc::endpoint(&opts.rpc).ok_or_else(|| {
+                anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
+            })?;
+            let session = open_rpc(&url)?;
+            let scan_from = opts
+                .scan_from
+                .as_deref()
+                .map(|h| RpcHash::from_str(h).map_err(|e| anyhow!("bad --scan-from hash: {e}")))
+                .transpose()?;
+            explore::Explorer {
+                client: session.client.clone(),
+                handle: session.rt.handle().clone(),
+                cfg: ScanConfig {
+                    scan_from,
+                    max_batches: opts.max_batches,
+                    min_confirmations: opts.min_confirmations,
+                    max_spend_scan_blocks: opts.max_spend_scan_blocks,
+                },
+                rpc_url: url,
+            }
+            .serve(&listen)?;
         }
         Cmd::Job { cmd } => run_job(cmd)?,
         Cmd::Escrow { cmd } => run_escrow(cmd)?,
