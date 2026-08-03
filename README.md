@@ -143,6 +143,10 @@ Both transports were exercised against this anchor:
 | `grpc://` | own node, LAN | ~25s |
 | `wss://` (borsh wRPC) | unrelated public node | ~51s |
 
+The verifier is separately confirmed on **testnet-10**, against real settlements
+found on that chain — same two-phase spend-based path, same negative and
+unresolvable verdicts.
+
 The wRPC run matters beyond transport coverage: a node that has never seen any
 of our data independently confirmed both chains. That is the entire claim of
 portable pseudonymous reputation — anyone can check it, and checking needs
@@ -153,9 +157,21 @@ Negative control, on both transports: an identically co-signed chain naming a
 on-chain" and exit code 1. Nothing spent it, so nothing anchors it — which is
 the whole point.
 
-Verification cost is dominated by the pruning-point-to-tip scan. `--scan-from`
-with a recent chain block cuts it sharply when you know roughly when the
-settlement happened.
+Verification cost is dominated by the pruning-point-to-tip scan, and it scales
+with block rate rather than with chain length:
+
+| network | full scan | wall clock |
+|---|---|---|
+| mainnet | 471 batches | ~25s (LAN gRPC) |
+| testnet-10 (10 BPS) | 493 batches | ~1m53s |
+
+`--scan-from` with a recent chain block cuts that sharply when you know roughly
+when the settlement happened; the 4096 `--max-batches` default is comfortable
+on both networks.
+
+Anchors are network-scoped in practice: a mainnet outpoint queried against
+testnet-10 comes back *unresolvable*, not "unanchored" — the verifier will not
+claim a negative about a transaction that may exist on a chain it cannot see.
 
 ## Next
 
