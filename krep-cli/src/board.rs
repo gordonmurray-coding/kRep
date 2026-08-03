@@ -8,7 +8,7 @@
 //! relay's verdict separately, because "one relay accepted it" and "the job is
 //! visible" are different claims.
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use krep_board::job::{job_address, Acceptance, Claim, JobPost, KIND_ACCEPT, KIND_CLAIM, KIND_JOB};
 use krep_board::relay::{newest_per_address, publish_all, query_all, Filter};
 use krep_board::Event;
@@ -125,6 +125,41 @@ pub async fn claims_for(urls: &[String], job_addr: &str) -> Result<Vec<(Claim, E
             if addr == job_addr {
                 out.push((c, e));
             }
+        }
+    }
+    Ok(out)
+}
+
+/// Send a private message. Only the recipient can read it, and the relay
+/// cannot tell who sent it.
+pub async fn dm_send(
+    urls: &[String],
+    sender: &Keypair,
+    to: &secp256k1::XOnlyPublicKey,
+    message: &str,
+    now: u64,
+) -> Result<(String, Vec<(String, String)>)> {
+    let gift = krep_board::nip17::wrap(sender, to, message, now).map_err(|e| anyhow!("{e}"))?;
+    Ok((gift.id.clone(), publish_all(urls, &gift, TIMEOUT).await))
+}
+
+/// Read private messages addressed to us.
+///
+/// Wraps we cannot open are skipped rather than reported: a relay will return
+/// every wrap addressed to this pubkey, including any whose inner layers are
+/// malformed or forged, and those are noise rather than errors.
+pub async fn dm_inbox(urls: &[String], me: &Keypair) -> Result<Vec<(krep_board::nip17::Rumor, u64)>> {
+    let p = hex::encode(me.x_only_public_key().0.serialize());
+    let filter = Filter {
+        kinds: Some(vec![krep_board::nip17::KIND_GIFT_WRAP]),
+        p_tags: Some(vec![p]),
+        limit: Some(200),
+        ..Default::default()
+    };
+    let mut out = Vec::new();
+    for e in query_all(urls, &filter, TIMEOUT).await {
+        if let Ok(rumor) = krep_board::nip17::unwrap(me, &e) {
+            out.push((rumor, e.created_at));
         }
     }
     Ok(out)

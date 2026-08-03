@@ -37,6 +37,8 @@ pub struct Filter {
     pub a_tags: Option<Vec<String>>,
     #[serde(rename = "#d", skip_serializing_if = "Option::is_none")]
     pub d_tags: Option<Vec<String>>,
+    #[serde(rename = "#p", skip_serializing_if = "Option::is_none")]
+    pub p_tags: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
 }

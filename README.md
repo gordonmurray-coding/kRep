@@ -420,15 +420,50 @@ is no covenant path out of that. `escrow open` now warns when a deadline is
 implausibly far off, but the real lesson is that the deadline is a safety
 parameter, not paperwork.
 
-The shipping address had to be exchanged out of band: NIP-17 encrypted DMs are
-not implemented, and they are the one part of the flow that genuinely cannot be
-public.
+The shipping address had to be exchanged out of band. That gap is now closed —
+see below.
+
+### Private messages
+
+The shipping address and the design file's decryption key are the two things
+that genuinely cannot be public. They go over NIP-17, wrapped per NIP-59:
+
+```bash
+krep job dm    --seed buyer.seed --context fabmesh --to <maker pubkey> --message "Ship to: …"
+krep job inbox --seed maker.seed --context fabmesh
+```
+
+Three layers, each hiding something different:
+
+- **rumor** (kind 14) — the message, deliberately *unsigned*. A signed chat
+  message is a transferable receipt of what you said; the recipient can read it
+  but cannot prove to anyone else that you wrote it.
+- **seal** (kind 13) — the rumor encrypted to the recipient and signed by the
+  sender's real key. This is what establishes authorship, and only the
+  recipient can open it.
+- **gift wrap** (kind 1059) — the seal encrypted again and signed by a
+  throwaway key generated fresh per message, so two messages from the same
+  sender share no visible identifier.
+
+A relay sees a wrap addressed to the recipient from a pubkey that has never
+appeared before. It learns who is receiving and roughly when — timestamps are
+jittered by up to two days — and nothing else.
+
+Encryption is NIP-44 v2: ChaCha20, HMAC-SHA256, HKDF over an ECDH secret,
+encrypt-then-MAC with the nonce authenticated. It is checked against the
+official NIP-44 vectors — all 35 conversation keys, 24 padding cases, the
+encrypt/decrypt round trips and every invalid-input case — because a hand-read
+of the spec is not evidence.
+
+Verified against a live relay: a buyer sent an address to a maker's pseudonym,
+the maker's inbox recovered both the message and the true sender from the inner
+seal, and the buyer's own inbox showed nothing, since a wrap is readable only by
+its addressee.
 
 ## Next
 
 1. Finish the dogfood run's physical half.
-2. NIP-17 DMs, so the address and file key stop being out of band.
-3. M5 — rep explorer: paste a chain head, get a verified score.
+2. M5 — rep explorer: paste a chain head, get a verified score.
 
 ## Deliberate design points (don't "fix" these)
 

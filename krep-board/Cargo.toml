@@ -20,3 +20,13 @@ kaspa-hashes = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0.1"
 tokio-tungstenite = { version = "0.23", features = ["rustls-tls-webpki-roots"] }
 tokio = { version = "1", features = ["rt", "macros", "time"] }
 futures-util = "0.3"
+
+# NIP-44 v2. sha2/chacha20/base64/subtle were already vendored transitively;
+# hmac and hkdf are the two additions.
+hmac = "0.12"
+hkdf = "0.12"
+sha2 = "0.10"
+chacha20 = "0.9"
+base64 = "0.22"
+subtle = "2"
+rand = "0.8"

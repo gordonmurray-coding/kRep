@@ -363,6 +363,33 @@ enum JobCmd {
         #[command(flatten)]
         relay: RelayOpts,
     },
+    /// Send a private message — the shipping address, or the file's key.
+    ///
+    /// The relay sees a message addressed to the recipient from a throwaway
+    /// key, and learns nothing about who sent it or what it says.
+    Dm {
+        /// Sender's pseudonym.
+        #[arg(long, requires = "context")]
+        seed: PathBuf,
+        #[arg(long)]
+        context: Option<String>,
+        /// Recipient's x-only pubkey, hex.
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        message: String,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// Read private messages addressed to a pseudonym.
+    Inbox {
+        #[arg(long, requires = "context")]
+        seed: PathBuf,
+        #[arg(long)]
+        context: Option<String>,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
     /// Check a posting against the escrow it claims to be backed by.
     Verify {
         #[arg(long)]
@@ -900,6 +927,25 @@ fn run_job(cmd: JobCmd) -> Result<()> {
             };
             let (id, results) = rt.block_on(board::accept(&urls, &key, &job_addr, &a, now()))?;
             report("accepted", &id, results);
+        }
+        JobCmd::Dm { seed, context, to, message, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let ctx = context.ok_or_else(|| anyhow!("--context is required"))?;
+            let key = load_keypair(&seed, &ctx)?;
+            let to = parse_xonly(&to)?;
+            let (id, results) = rt.block_on(board::dm_send(&urls, &key, &to, &message, now()))?;
+            eprintln!("sent privately to {}", hex::encode(to.serialize()));
+            report("gift wrap", &id, results);
+        }
+        JobCmd::Inbox { seed, context, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let ctx = context.ok_or_else(|| anyhow!("--context is required"))?;
+            let key = load_keypair(&seed, &ctx)?;
+            let msgs = rt.block_on(board::dm_inbox(&urls, &key))?;
+            eprintln!("{} message(s)", msgs.len());
+            for (r, wrapped_at) in msgs {
+                println!("from {} (wrap seen at {wrapped_at})\n  {}", &r.pubkey[..16], r.content);
+            }
         }
         JobCmd::Awarded { job_addr, relay } => {
             let urls = board::relays(&relay.relays)?;
