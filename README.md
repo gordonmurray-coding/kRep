@@ -490,10 +490,25 @@ Four verdicts, kept distinct because they mean very different things:
 
 | verdict | meaning |
 |---|---|
-| **Not a chain** | not a valid attestation chain file |
-| **Chain is broken** | signatures or the hash-linked order do not hold |
-| **Not proven on-chain** | well-formed, but an entry is not anchored in a settled transaction |
-| **Anchored and verified** | every entry committed in a settled Kaspa transaction |
+| **That isn't a record file** | not a valid attestation chain |
+| **This file has been tampered with** | signatures or the hash-linked order do not hold |
+| **Some of this never happened** | well-formed, but an entry is not anchored in a settled transaction |
+| **This record is real** | every entry committed in a settled Kaspa transaction |
+
+The wording is deliberately plain. The person who most needs this page is the
+one about to send money to a stranger, and they do not know what an attestation
+is — so the page never uses the word. Deals rather than trades, *never
+delivered* rather than *default*, *nickname* rather than *pseudonym*, and the
+size axis labelled in **KAS** rather than as bare numbers with no unit. The
+verdict itself is a sentence in English before it is a table of statistics:
+
+> Of 4 deals on record with 3 different people, 1 ended with them taking the job
+> and never delivering — 25% of everything they have done.
+
+A folded *how can a file like this be trusted?* panel answers the question a
+first-time visitor actually has, including the part most reputation systems
+leave out: what it still cannot tell you. Not who they are, not everything they
+have done, and not whether two friends traded with each other to build it.
 
 The breakdown surfaces two things a raw score does not. **Concentration** — a
 handful of counterparties across many trades is flagged, because a small circle
