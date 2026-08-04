@@ -153,6 +153,9 @@ fn toml_fields(f: &[Field]) -> String {
 pub struct Witness {
     pub toml: String,
     pub used: usize,
+    /// Successes in the chain that the scan did not cover. Reported so a short
+    /// count is never quietly attributed to a thin trading history.
+    pub unanchored: usize,
     pub pseudonym: [u8; 32],
     pub anchored_root: Field,
     pub defaults_root: Field,
@@ -184,6 +187,7 @@ pub fn witness(
     let mut sigs = Vec::new();
     let mut paths: Vec<Vec<Field>> = Vec::new();
     let mut indices = Vec::new();
+    let mut unanchored = 0usize;
 
     for att in &chain.attestations {
         if bodies.len() == MAX_SUCCESSES {
@@ -205,11 +209,14 @@ pub fn witness(
 
         let leaf = anchor_leaf(&att.body.anchor.txid, att.body.anchor.index, &att.id());
         let Some(proof) = anchored.prove(&leaf) else {
-            bail!(
-                "attestation {} is not in the anchored set that was rebuilt from the chain.\n\
-                 Either its settlement is outside the scanned window, or it was never anchored.",
-                hex::encode(att.id())
-            );
+            // Skip rather than refuse. Failing the whole chain here would mean
+            // someone with ten successes, the earliest two of which settled
+            // before the scan began, could prove nothing at all — and a scan is
+            // always a window, so that is the ordinary case rather than a
+            // strange one. How many were dropped is reported, so "skipped" can
+            // never be mistaken for "counted".
+            unanchored += 1;
+            continue;
         };
         if proof.siblings.len() != ANCHOR_DEPTH {
             bail!(
@@ -227,14 +234,27 @@ pub fn witness(
     }
 
     let used = bodies.len();
+    // The window is the usual reason a prover comes up short, and saying so is
+    // the difference between "rescan further back" and "give up".
+    let window = if unanchored > 0 {
+        format!(
+            " ({unanchored} more {} in this chain, but {} not in the scanned window — \
+             rescan further back if you need {})",
+            if unanchored == 1 { "success is" } else { "successes are" },
+            if unanchored == 1 { "it is" } else { "they are" },
+            if unanchored == 1 { "it" } else { "them" },
+        )
+    } else {
+        String::new()
+    };
+    if used == 0 {
+        bail!("no anchored successes in this chain — there is nothing to prove{window}");
+    }
     if used < min_successes as usize {
         bail!(
-            "only {used} anchored success{} available, but the proof claims {min_successes}",
+            "only {used} anchored success{} available, but the proof claims {min_successes}{window}",
             if used == 1 { " is" } else { "es are" }
         );
-    }
-    if used == 0 {
-        bail!("no anchored successes in this chain — there is nothing to prove");
     }
 
     // Unused slots repeat slot zero. The circuit ignores them past `used`, and
@@ -262,7 +282,7 @@ pub fn witness(
     toml.push_str(&format!("leaf_indices = [{}]\n", idx_list.join(", ")));
     toml.push_str(&format!("defaults_path = {}\n", toml_fields(&smt_proof.siblings)));
 
-    Ok(Witness { toml, used, pseudonym: subject, anchored_root, defaults_root })
+    Ok(Witness { toml, used, unanchored, pseudonym: subject, anchored_root, defaults_root })
 }
 
 /// Where the Noir toolchain lives.
@@ -440,10 +460,10 @@ mod tests {
     }
 
     #[test]
-    fn an_unanchored_success_is_refused_rather_than_padded_around() {
+    fn an_unanchored_success_never_counts_toward_the_claim() {
         // The chain verifies and the signatures are real; the settlement simply
-        // is not in the set. Silently skipping it would let a prover claim a
-        // number of successes the accumulator does not support.
+        // is not in the set. Counting it would let a prover claim a number of
+        // successes the accumulator does not support.
         let (me, buyer) = (kp("ghost"), kp("buyer"));
         let chain = chain_with(&me, &buyer, Outcome::Success, [0x61; 32]);
         let (_, defaults) = accumulators(&chain, vec![]);
@@ -452,7 +472,54 @@ mod tests {
             ANCHOR_DEPTH,
         );
         let err = witness(&chain, &elsewhere, &defaults, 1).unwrap_err().to_string();
-        assert!(err.contains("not in the anchored set"), "{err}");
+        assert!(err.contains("nothing to prove"), "{err}");
+        // And it says why, because "rescan further back" and "you have no
+        // successes" call for very different responses.
+        assert!(err.contains("not in the scanned window"), "{err}");
+    }
+
+    #[test]
+    fn successes_outside_the_window_are_skipped_rather_than_sinking_the_chain() {
+        // A scan is always a window. Someone whose earliest settlements fell out
+        // of it should still be able to prove the ones that did not — refusing
+        // the whole chain makes an ordinary situation unprovable.
+        let (me, buyer) = (kp("longlived"), kp("buyer"));
+        let mut chain = Chain::new(me.x_only_public_key().0);
+        for (i, txid) in [[0x91u8; 32], [0x92; 32], [0x93; 32]].iter().enumerate() {
+            let body = AttestationBody {
+                v: 2,
+                anchor: Outpoint { txid: *txid, index: 0 },
+                role: Role::Provider,
+                owner: me.x_only_public_key().0,
+                counterparty: buyer.x_only_public_key().0,
+                outcome: Outcome::Success,
+                amount_bucket: 2,
+                prev: chain.head(),
+                index: i as u64,
+                ts: 1_785_000_000 + i as u64,
+            };
+            chain
+                .append(countersign(&buyer, create_partial(&me, body).unwrap()).unwrap())
+                .unwrap();
+        }
+        // The accumulator covers only the last two, as if the first aged out.
+        let mut leaves: Vec<Vec<u8>> = chain.attestations[1..]
+            .iter()
+            .map(|a| anchor_leaf(&a.body.anchor.txid, a.body.anchor.index, &a.id()))
+            .collect();
+        for i in 0..6u8 {
+            leaves.push(anchor_leaf(&[i; 32], 0, &[i.wrapping_add(40); 32]));
+        }
+        let anchored = MerkleTree::build_fixed_depth(leaves, ANCHOR_DEPTH);
+        let defaults = SparseMerkleTree::from_keys(Vec::<[u8; 32]>::new());
+
+        let w = witness(&chain, &anchored, &defaults, 2).unwrap();
+        assert_eq!(w.used, 2);
+        assert_eq!(w.unanchored, 1);
+        // But the skipped one still cannot be claimed.
+        let err = witness(&chain, &anchored, &defaults, 3).unwrap_err().to_string();
+        assert!(err.contains("only 2 anchored successes"), "{err}");
+        assert!(err.contains("not in the scanned window"), "{err}");
     }
 
     #[test]

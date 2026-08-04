@@ -1590,6 +1590,13 @@ fn main() -> Result<()> {
                 if w.used == 1 { "" } else { "es" },
                 saved.anchored_leaves.len()
             );
+            if w.unanchored > 0 {
+                eprintln!(
+                    "  {} further success{} skipped — not in the scanned window",
+                    w.unanchored,
+                    if w.unanchored == 1 { " was" } else { "es were" }
+                );
+            }
 
             // The witness names the pseudonym and carries every body in full, so
             // it lives in a scratch directory that is removed on every exit path

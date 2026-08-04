@@ -706,7 +706,7 @@ not verify:
 | situation | what the prover is told |
 |---|---|
 | pseudonym is in the defaults set | recorded as having defaulted — that is the accumulator working, not a bug |
-| a success is outside the scanned window | not in the anchored set; either unanchored or outside the scan |
+| a success is outside the scanned window | skipped, and counted: "N more successes are not in the scanned window" |
 | fewer successes than claimed | only N anchored successes available |
 | the scan never reached the tip | warned before anything else, since honest provers will fail against it |
 
