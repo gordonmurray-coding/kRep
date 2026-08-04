@@ -1,89 +1,113 @@
-//! Emit a `Prover.toml` for the selective-disclosure circuit from real
-//! accumulators, so the circuit is exercised against the same code a verifier
-//! runs rather than against hand-written fixtures.
+//! Emit a `Prover.toml` for the selective-disclosure circuit from genuinely
+//! co-signed v2 attestations and real accumulators, so the circuit is exercised
+//! against the code a verifier runs rather than hand-written fixtures.
+//!
+//! `KREP_SUBJECT=defaulter` emits the case the circuit must refuse: a pseudonym
+//! that really was slashed trying to prove a clean record.
+//! `KREP_TAMPER=owner` emits a prover pairing somebody else's anchored success
+//! with their own pseudonym — the attack the binding step exists to stop.
 
+use krep_core::{countersign, create_partial, derive_context_keypair, Attestation, AttestationBody, Outcome, Outpoint, Role};
 use krep_zk::hash::Field;
 use krep_zk::merkle::MerkleTree;
 use krep_zk::scan::anchor_leaf;
 use krep_zk::smt::SparseMerkleTree;
+use secp256k1::Keypair;
 
 const ANCHOR_DEPTH: usize = 20;
 const MAX_SUCCESSES: usize = 4;
 
-/// The field encoding of a leaf, matching what `hash_leaf` absorbs: 16-byte
-/// chunks big-endian, then the byte length.
-fn leaf_fields(leaf: &[u8]) -> Vec<Field> {
-    let mut out = Vec::new();
-    for chunk in leaf.chunks(16) {
-        let mut buf = [0u8; 16];
-        buf[16 - chunk.len()..].copy_from_slice(chunk);
-        out.push(Field::from(u128::from_be_bytes(buf)));
-    }
-    out.push(Field::from(leaf.len() as u128));
-    out
+fn pseudonym(tag: &str) -> Keypair {
+    let mut seed = [0u8; 32];
+    seed[..tag.len().min(32)].copy_from_slice(&tag.as_bytes()[..tag.len().min(32)]);
+    derive_context_keypair(&seed, "fabmesh")
+}
+
+/// A real co-signed v2 attestation between two pseudonyms.
+fn attest(owner: &Keypair, cp: &Keypair, anchor_txid: [u8; 32], outcome: Outcome) -> Attestation {
+    let body = AttestationBody {
+        v: 2,
+        anchor: Outpoint { txid: anchor_txid, index: 0 },
+        role: Role::Provider,
+        owner: owner.x_only_public_key().0,
+        counterparty: cp.x_only_public_key().0,
+        outcome,
+        amount_bucket: 2,
+        prev: None,
+        index: 0,
+        ts: 1_785_000_000,
+    };
+    countersign(cp, create_partial(owner, body).expect("owner signs")).expect("counterparty signs")
 }
 
 fn q(f: &Field) -> String {
     format!("\"{}\"", krep_zk::hash::to_hex(f))
 }
-
-fn h32(s: &str) -> [u8; 32] {
-    hex::decode(s).expect("hex").try_into().expect("32 bytes")
+fn bytes_toml(b: &[u8]) -> String {
+    format!("[{}]", b.iter().map(|x| format!("\"{x}\"")).collect::<Vec<_>>().join(", "))
 }
 
 fn main() {
-    // A settlement that really anchored on testnet-10 during the M2-M4 runs.
-    let escrow = h32("89495c52d44340a2b1dec34c82ce0c6f58ad1e2dbc6c80249fce2060d3f05af4");
-    let maker_id = h32("edbf04bbcbbe2fe103a9b95aeb96ede5f266e42c5aa01cc1239e79fe4f13fb8c");
-    let buyer_id = h32("4f06a2f06b98daae171d48d2fdc506f6fc0d4051cde8051b9238b6bc8f881041");
+    let me = pseudonym("clean-maker");
+    let buyer = pseudonym("a-buyer");
+    let defaulter = pseudonym("defaulted-maker");
 
-    let mine = anchor_leaf(&escrow, 0, &buyer_id);
-    let mut all = vec![mine.clone(), anchor_leaf(&escrow, 0, &maker_id)];
-    // Unrelated traffic, so the tree is not trivially small.
+    // Our own success, plus one belonging to somebody else.
+    let mine = attest(&me, &buyer, [0x11; 32], Outcome::Success);
+    let theirs = attest(&defaulter, &buyer, [0x22; 32], Outcome::Success);
+
+    // The anchored accumulator, as a verifier would rebuild it from chain data.
+    let mut leaves = vec![
+        anchor_leaf(&mine.body.anchor.txid, 0, &mine.id()),
+        anchor_leaf(&theirs.body.anchor.txid, 0, &theirs.id()),
+    ];
     for i in 0..30u8 {
-        all.push(anchor_leaf(&[i; 32], 0, &[i.wrapping_add(9); 32]));
+        leaves.push(anchor_leaf(&[i; 32], 0, &[i.wrapping_add(9); 32]));
     }
-    let tree = MerkleTree::build_fixed_depth(all, ANCHOR_DEPTH);
+    let tree = MerkleTree::build_fixed_depth(leaves, ANCHOR_DEPTH);
     let anchored_root = tree.root().expect("root");
-    let proof = tree.prove(&mine).expect("our leaf is present");
 
-    // The defaults tree, holding a pseudonym a real slash recorded.
-    let defaults = SparseMerkleTree::from_keys([h32(
-        "b36ede013b3204d71dfd3dd69636a3079a1a2b0796844f2678b99dbf5a247128",
-    )]);
-    // Whose reputation are we proving? The buyer never defaulted; the maker
-    // did. Setting KREP_SUBJECT=defaulter emits the maker's case, which the
-    // circuit must refuse to solve.
-    let defaulter = h32("b36ede013b3204d71dfd3dd69636a3079a1a2b0796844f2678b99dbf5a247128");
-    let clean = h32("c85c8b847594ad3573a72d36b0d645ef9de8ed591d46ad221d0a68e99e2b43e1");
-    let subject =
-        if std::env::var("KREP_SUBJECT").as_deref() == Ok("defaulter") { defaulter } else { clean };
+    // The defaults tree, holding the pseudonym that was slashed.
+    let defaults = SparseMerkleTree::from_keys([defaulter.x_only_public_key().0.serialize()]);
+
+    let tamper = std::env::var("KREP_TAMPER").unwrap_or_default();
+    let subject_is_defaulter = std::env::var("KREP_SUBJECT").as_deref() == Ok("defaulter");
+
+    // Which attestation is offered, and which pseudonym it is offered for.
+    let (att, subject) = if tamper == "owner" {
+        // Somebody else's anchored success, claimed under our clean pseudonym.
+        (&theirs, me.x_only_public_key().0.serialize())
+    } else if subject_is_defaulter {
+        (&theirs, defaulter.x_only_public_key().0.serialize())
+    } else {
+        (&mine, me.x_only_public_key().0.serialize())
+    };
+
+    let leaf = anchor_leaf(&att.body.anchor.txid, 0, &att.id());
+    let proof = tree.prove(&leaf).expect("the offered attestation is anchored");
     let smt_proof = defaults.prove(&subject);
 
-    let fields = leaf_fields(&mine);
-    let leaves: Vec<String> =
-        (0..MAX_SUCCESSES).map(|_| format!("[{}]", fields.iter().map(q).collect::<Vec<_>>().join(", "))).collect();
-    let path = format!("[{}]", proof.siblings.iter().map(q).collect::<Vec<_>>().join(", "));
-    let paths: Vec<String> = (0..MAX_SUCCESSES).map(|_| path.clone()).collect();
-    let indices: Vec<String> = (0..MAX_SUCCESSES)
-        .map(|s| format!("\"{}\"", if s == 0 { proof.leaf_index } else { 0 }))
-        .collect();
-
-    let bits: Vec<String> = (0..256)
-        .map(|level| {
-            let idx = 255 - level;
-            let set = subject[idx / 8] & (1 << (7 - (idx % 8))) != 0;
-            format!("\"{}\"", u8::from(set))
-        })
-        .collect();
+    let mut body_bytes = att.body.canonical_bytes();
+    assert_eq!(body_bytes.len(), 152);
+    let mut sig_bytes = att.sig_owner().expect("co-signed").as_ref().to_vec();
+    sig_bytes.extend_from_slice(att.sig_counterparty().expect("co-signed").as_ref());
+    assert_eq!(sig_bytes.len(), 128);
 
     println!("anchored_root = {}", q(&anchored_root));
     println!("defaults_root = {}", q(&defaults.root()));
     println!("min_successes = \"1\"");
     println!("used = \"1\"");
-    println!("leaves = [{}]", leaves.join(", "));
-    println!("leaf_paths = [{}]", paths.join(", "));
-    println!("leaf_indices = [{}]", indices.join(", "));
-    println!("pseudonym_bits = [{}]", bits.join(", "));
+    println!("pseudonym = {}", bytes_toml(&subject));
+    let bodies: Vec<String> = (0..MAX_SUCCESSES).map(|_| bytes_toml(&body_bytes)).collect();
+    let sigs: Vec<String> = (0..MAX_SUCCESSES).map(|_| bytes_toml(&sig_bytes)).collect();
+    println!("bodies = [{}]", bodies.join(", "));
+    println!("sigs = [{}]", sigs.join(", "));
+    let path = format!("[{}]", proof.siblings.iter().map(q).collect::<Vec<_>>().join(", "));
+    println!("leaf_paths = [{}]", (0..MAX_SUCCESSES).map(|_| path.clone()).collect::<Vec<_>>().join(", "));
+    println!(
+        "leaf_indices = [{}]",
+        (0..MAX_SUCCESSES).map(|s| format!("\"{}\"", if s == 0 { proof.leaf_index } else { 0 })).collect::<Vec<_>>().join(", ")
+    );
     println!("defaults_path = [{}]", smt_proof.siblings.iter().map(q).collect::<Vec<_>>().join(", "));
+    body_bytes.clear();
 }

@@ -580,29 +580,26 @@ honest prover (clean pseudonym)   -> witness solved
 the defaulter attempting the same -> Failed assertion (defaults root)
 ```
 
-**Known gap, stated plainly.** As written the circuit proves that *some*
-attestations are anchored and that *a* pseudonym has not defaulted — but nothing
-binds those together. A prover could pair someone else's anchored successes with
-their own clean pseudonym.
+**How the two halves are bound.** The danger in a proof like this is that it
+establishes two true but unrelated things: that *some* attestations are
+anchored, and that *a* pseudonym is clean. So everything derives from one
+witness per attestation — its body and signatures — rather than being supplied
+alongside it. The id is recomputed by rehashing body ‖ signatures; the outpoint
+the leaf commits to is read out of the body, where it sits inside the signed
+bytes; the owner is read out of the body and required to equal the pseudonym the
+absence proof is about; the outcome is read out and required to be a success,
+because "N anchored attestations" and "N successes" are not the same claim. The
+pseudonym's bits, which walk the sparse tree, are derived from its bytes rather
+than accepted separately — otherwise a prover could walk the tree as one
+identity while claiming attestations as another.
 
-Closing it means proving `owner == pseudonym` per attestation, which means
-recomputing the attestation id from its body in-circuit, since the id is all the
-accumulator can hold.
+Three cases, run against the real circuit:
 
-**That is now possible.** Attestation ids are versioned by the body's own `v`
-field: v1 ids are blake3, v2 ids are Poseidon2 over the same body and
-signatures. New attestations are minted at v2, so a circuit can recompute one
-with a handful of permutations instead of a blake3 implementation Noir does not
-ship. Chains anchored under v1 keep verifying — the payloads that committed
-them can never be rewritten, and both the mainnet and testnet chains from
-M1–M4 still check out unchanged.
-
-Only the id changed. The body layout is untouched, and `signing_digest` stays
-blake3, because a circuit never needs to *verify* signatures — it only needs the
-id to bind to them, so that recomputing an id from a body proves that body is
-what the settlement anchored.
-
-**Still to build:** the circuit's binding step — recompute the v2 id from a
+```
+honest prover (own success, clean pseudonym)  -> witness solved
+a defaulter claiming a clean record           -> Failed assertion (defaults root)
+someone else's success claimed as your own    -> Failed assertion (belongs to another pseudonym)
+```
 witnessed body and check it against the leaf, then check `owner == pseudonym`.
 
 ## Next
