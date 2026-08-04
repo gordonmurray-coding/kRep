@@ -695,9 +695,20 @@ not verify:
 to conceal. That leak would be silent and total, so it is checked rather than
 asserted in a comment.
 
-`nargo` and `bb` are external programs rather than crates. When they are absent
-the witness is still written and the two commands printed, so the milestone does
-not become unreachable for want of an installer.
+`nargo` and `bb` are external programs rather than crates. When they are absent,
+`--witness-only` still writes the witness and prints the two commands, so the
+milestone does not become unreachable for want of an installer.
+
+**Proving happens in a scratch directory, not in this repo.** It used to run in
+`krep-zk/circuit/`, which made `krep prove` work from a checkout and nowhere
+else — and left `Prover.toml` in the source tree, holding the pseudonym and
+every attestation body in full. A command whose entire purpose is to reveal none
+of that should not write all of it next to a `.git`. The eleven kilobytes of
+Noir are compiled into the binary instead and materialised per run, which also
+pins what was proved: the circuit cannot be swapped underneath a proof by
+editing files beside it. Cleanup is on `Drop` rather than at the end of the
+happy path, since the failure paths are the ones that would leave a witness
+behind.
 
 `krep-cli/tests/prove_roundtrip.rs` runs the whole loop offline — real
 attestations, real trees, real UltraHonk proof — and its last two cases are the

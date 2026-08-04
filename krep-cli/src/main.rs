@@ -1591,31 +1591,42 @@ fn main() -> Result<()> {
                 saved.anchored_leaves.len()
             );
 
-            let dir = prove::circuit_dir();
+            // The witness names the pseudonym and carries every body in full, so
+            // it lives in a scratch directory that is removed on every exit path
+            // rather than anywhere it might be forgotten.
+            let scratch = prove::Scratch::new("prove")?;
+            let dir = scratch.path().to_path_buf();
             fs::write(dir.join("Prover.toml"), &w.toml)?;
-            let Some(tools) = prove::find_toolchain() else {
-                bail!(
-                    "witness written to {}/Prover.toml, but nargo and bb were not found.\n\
-                     Install them and run:\n  nargo execute -p Prover.toml\n  \
-                     bb prove -b target/circuit.json -w target/circuit.gz -o target",
-                    dir.display()
-                )
-            };
             if witness_only {
-                eprintln!("witness written to {}/Prover.toml", dir.display());
+                let kept = out.with_extension("toml");
+                fs::write(&kept, &w.toml)?;
+                eprintln!(
+                    "witness written to {} — it names the pseudonym and every body, so treat it\n\
+                     as private. Prove with:\n  nargo execute -p Prover.toml\n  \
+                     bb prove -b target/circuit.json -w target/circuit.gz -o target",
+                    kept.display()
+                );
                 return Ok(());
             }
+            let Some(tools) = prove::find_toolchain() else {
+                bail!(
+                    "nargo and bb were not found. Install them, or re-run with --witness-only \
+                     to get the witness and prove it yourself."
+                )
+            };
 
-            eprintln!("executing the circuit…");
+            eprintln!("compiling and executing the circuit…");
             prove::run(&tools.nargo, &["execute", "-p", "Prover.toml"], &dir)?;
+            // The key first: `bb prove` reads the verification key rather than
+            // deriving it, and in a fresh directory there is none to read.
+            eprintln!("writing the verification key…");
+            prove::run(&tools.bb, &["write_vk", "-b", "target/circuit.json", "-o", "target"], &dir)?;
             eprintln!("proving…");
-            let _ = fs::remove_dir_all(dir.join("target/proof"));
             prove::run(
                 &tools.bb,
                 &["prove", "-b", "target/circuit.json", "-w", "target/circuit.gz", "-o", "target"],
                 &dir,
             )?;
-            prove::run(&tools.bb, &["write_vk", "-b", "target/circuit.json", "-o", "target"], &dir)?;
 
             let bundle = prove::ProofBundle {
                 min_successes,

@@ -306,9 +306,51 @@ pub fn run(program: &Path, args: &[&str], cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The circuit directory shipped with this repo.
-pub fn circuit_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../krep-zk/circuit")
+/// The circuit, carried in the binary.
+///
+/// Proving used to run inside the repo's own circuit directory. That made
+/// `krep prove` work from a checkout and nowhere else — and worse, it left
+/// `Prover.toml` in the source tree, which holds the pseudonym and every
+/// attestation body in full. A command whose purpose is to reveal none of that
+/// should not write all of it to disk next to a `.git`.
+///
+/// Eleven kilobytes of Noir is a cheap thing for the binary to carry, and it
+/// also pins what was proved: the circuit cannot be swapped underneath a proof
+/// by editing files beside it.
+const CIRCUIT_FILES: &[(&str, &str)] = &[
+    ("Nargo.toml", include_str!("../../krep-zk/circuit/Nargo.toml")),
+    ("src/main.nr", include_str!("../../krep-zk/circuit/src/main.nr")),
+    ("src/attestation.nr", include_str!("../../krep-zk/circuit/src/attestation.nr")),
+    ("src/hash.nr", include_str!("../../krep-zk/circuit/src/hash.nr")),
+];
+
+/// A scratch copy of the circuit, removed when it goes out of scope.
+///
+/// The witness lives in here, so leaving it behind on the failure paths would
+/// undo the point of moving it out of the repo. `Drop` covers the `?` returns
+/// that an explicit cleanup at the end of the happy path would miss.
+pub struct Scratch(PathBuf);
+
+impl Scratch {
+    pub fn new(tag: &str) -> Result<Scratch> {
+        let dir = std::env::temp_dir().join(format!("krep-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src"))?;
+        for (name, body) in CIRCUIT_FILES {
+            std::fs::write(dir.join(name), body)?;
+        }
+        Ok(Scratch(dir))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 #[cfg(test)]
