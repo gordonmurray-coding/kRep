@@ -388,7 +388,7 @@ and an acceptance pointing at a funded testnet escrow — published, read back a
 verified. `relay.damus.io` returned 503 while `nos.lol` accepted, which is
 exactly why publishing is multi-relay and reports per-relay verdicts.
 
-## M4 — dogfood run (in progress)
+## M4 — dogfood run
 
 A real job is live on testnet-10 and a public relay, and every digital step has
 been run end to end:
@@ -402,10 +402,21 @@ been run end to end:
 | buyer accepts | acceptance published, naming the funded escrow |
 | maker bonds in | `1d9a11921a6bd13ea2d53aa614af0128ec6f40cd5f97a9d34f6b387e0acb0335` |
 
-The escrow now holds reward + bond and names the maker's pseudonym. What
-remains is physical: print `bracket.scad`, ship it, then `escrow ship` with the
-real tracking number hashed, and `escrow settle` to mint both sides'
-reputation.
+Completed with a **simulated shipment** — the tracking number is labelled as
+such rather than dressed up as real:
+
+| step | result |
+|---|---|
+| maker records shipment | `a51ef382b328217c362367d4d344d990234ea7e60cfe7c0aaea637e58d3ef912` |
+| buyer settles, minting both reputations | `5152249711dca493da67595eff174f39317f01e8c815cb9c7d979e11d950108c` |
+| both chains verify | maker `13459cd0…`, buyer `1b4021a2…` |
+
+Those are also the first **v2 Poseidon2 ids** anchored on a real chain, so the
+new id scheme is now exercised on-chain and not only in tests. The maker's score
+reads `verified · 1 trade · 0 defaults` — which is what the next buyer to
+consider them would see.
+
+Only actual atoms are missing: printing `bracket.scad` and posting it.
 
 That fourth row is the point of the whole project. The buyer chose a maker by
 scoring a reputation chain anchored in Kaspa transactions the maker could not
@@ -658,7 +669,8 @@ against fixed-depth trees simply failed to verify, with nothing to indicate why.
 
 ## Next
 
-1. Finish the dogfood run's physical half — the only step needing hands.
+1. A real physical dogfood run. The M4 loop has been driven end to end with a
+   simulated shipment; only actual atoms remain.
 2. A real end-to-end run of the rebuilt-root check — the scanner works on live
    data, but locating one specific settlement needs an unattended ~25 minute
    scan.
