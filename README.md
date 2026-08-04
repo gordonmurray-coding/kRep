@@ -735,6 +735,52 @@ ones worth having: the same proof checked against roots derived from a
 *different* scan must fail, and a proof of two successes must not satisfy a
 verifier demanding four.
 
+### The whole thing, on real data
+
+A full-window rebuild of testnet-10, then a proof about the M4 settlement and a
+check of it, with nothing invented:
+
+```
+scan     1,116,933 blocks, 11,524,111 accepted transactions, reached the tip
+         275,776 distinct anchored leaves  (depth 20 holds 1,048,576)
+         anchored root  0x1a0289c47cf5d32473347cec7459966dd49410261b491a72c665772b2d09c7f5
+         FOUND: the M4 attestation is anchored in the rebuilt set
+
+prove    55 s  ->  14,656-byte proof
+check    55 s  ->  VERIFIED, against roots derived from the scan
+```
+
+That closes the open question about the accumulator: a full pruning window
+rebuilds, fits with about 3.8x headroom, and the specific settlement can be
+located in it. The scan took roughly nine hours, which is the honest price of
+"anyone can maintain this" — a one-off, since following the tip afterwards is
+cheap.
+
+The negative cases were run against the same real data, not only fixtures:
+
+| | result |
+|---|---|
+| the proof against a *different* real scan | `UltraVerifier: verification failed`, exit 1 |
+| demanding 3 successes from a 1-success proof | refused before verifying, exit 1 |
+| the genuine case | VERIFIED, exit 0 |
+
+The bundle carries no pseudonym, no anchor txid, and no attestation id — checked
+rather than asserted.
+
+**Two costs worth stating.** Both `prove` and `check-proof` spend most of their
+55 seconds rebuilding a 275,776-leaf Poseidon2 tree from the saved scan; a debug
+build takes nine minutes for the same work, so measure with `--release`. And the
+saved scan is 37 MB, after deduplicating: a settlement spending several outpoints
+repeats each id once per input, so a raw scan is about 40% duplicates.
+
+**One caveat about the defaults half.** This window contained no slashes at all,
+so the defaults tree is empty and its root is the empty root. Non-membership in
+an empty set is true for everyone, which means the "0 defaults" half of the proof
+is currently carrying no weight on testnet-10 — not because the mechanism is
+wrong, but because nobody has defaulted inside the window. The M2 slash is older
+than the pruning point. Worth knowing before reading too much into a verified
+proof today.
+
 ### Rebuilding the roots from chain data
 
 ```bash
@@ -803,9 +849,8 @@ against fixed-depth trees simply failed to verify, with nothing to indicate why.
 
 1. A real physical dogfood run. The M4 loop has been driven end to end with a
    simulated shipment; only actual atoms remain.
-2. A real end-to-end run of the rebuilt-root check — the scanner works on live
-   data, but locating one specific settlement needs an unattended ~25 minute
-   scan.
+2. A default inside a scanned window, so the non-membership half of the proof is
+   exercised against a defaults tree that is not empty.
 
 ## Deliberate design points (don't "fix" these)
 

@@ -1585,7 +1585,7 @@ fn main() -> Result<()> {
             let (anchored, defaults) = saved.trees()?;
             let w = prove::witness(&chain, &anchored, &defaults, min_successes)?;
             eprintln!(
-                "witness built: {} anchored success{} claimed against {} anchored leaves",
+                "witness built: {} anchored success{} claimed against {} distinct anchored leaves",
                 w.used,
                 if w.used == 1 { "" } else { "es" },
                 saved.anchored_leaves.len()

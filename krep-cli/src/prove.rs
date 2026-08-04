@@ -62,12 +62,20 @@ pub struct RootsFile {
 
 impl RootsFile {
     pub fn from_scan(r: &crate::roots::Roots, depth: usize) -> Self {
+        // Deduplicate before saving. A leaf is (spent outpoint, id), and a
+        // settlement spending several outpoints repeats each id once per input,
+        // so a real scan comes out roughly 40% duplicates — 60 MB where 36 MB
+        // says the same thing. `build_fixed_depth` dedups anyway, so the tree
+        // and both roots are unchanged; only the file shrinks.
+        let mut leaves: Vec<String> = r.leaves.iter().map(hex::encode).collect();
+        leaves.sort_unstable();
+        leaves.dedup();
         RootsFile {
             depth,
             complete: r.reached_tip,
             anchored_root: r.anchored.root().as_ref().map(to_hex).unwrap_or_default(),
             defaults_root: to_hex(&r.defaults.root()),
-            anchored_leaves: r.leaves.iter().map(hex::encode).collect(),
+            anchored_leaves: leaves,
             defaulted: r.defaulted.iter().map(hex::encode).collect(),
         }
     }
