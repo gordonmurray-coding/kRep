@@ -600,6 +600,27 @@ honest prover (own success, clean pseudonym)  -> witness solved
 a defaulter claiming a clean record           -> Failed assertion (defaults root)
 someone else's success claimed as your own    -> Failed assertion (belongs to another pseudonym)
 ```
+
+### A real proof
+
+Barretenberg 5.1.0 (UltraHonk) produces and verifies an actual SNARK, not just
+a solved witness:
+
+```
+proving key      159 ms
+proof            14,656 bytes, generated in 0.73 s
+public inputs    96 bytes — anchored root, defaults root, min successes
+verification     succeeds
+```
+
+The three public inputs are exactly what a verifier must supply independently:
+two roots they rebuilt from chain data, and the threshold they are demanding.
+Everything else — which attestations, which pseudonym, which settlements —
+stays private.
+
+Tampering with either the proof or the public inputs fails verification, which
+is the property that makes the roots meaningful: a prover cannot substitute a
+defaults root that happens to omit them.
 witnessed body and check it against the leaf, then check `owner == pseudonym`.
 
 ### Rebuilding the roots from chain data
@@ -638,9 +659,9 @@ against fixed-depth trees simply failed to verify, with nothing to indicate why.
 ## Next
 
 1. Finish the dogfood run's physical half — the only step needing hands.
-2. Real proof generation. `nargo execute` solves witnesses, which is what
-   demonstrates the constraints hold, but producing and verifying an actual
-   SNARK needs the Barretenberg backend (`bb`), not installed here.
+2. A real end-to-end run of the rebuilt-root check — the scanner works on live
+   data, but locating one specific settlement needs an unattended ~25 minute
+   scan.
 
 ## Deliberate design points (don't "fix" these)
 
