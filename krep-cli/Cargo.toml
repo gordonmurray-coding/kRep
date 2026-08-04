@@ -28,4 +28,5 @@ kaspa-addresses = { git = "https://github.com/kaspanet/rusty-kaspa", tag = "v2.0
 tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
 krep-escrow = { path = "../krep-escrow" }
 krep-board = { path = "../krep-board" }
+krep-zk = { path = "../krep-zk" }
 serde = { version = "1", features = ["derive"] }

@@ -18,6 +18,7 @@ mod anchor;
 mod board;
 mod escrow;
 mod explore;
+mod roots;
 mod rpc;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -243,6 +244,29 @@ enum Cmd {
     Escrow {
         #[command(subcommand)]
         cmd: EscrowCmd,
+    },
+    /// Rebuild the M6 accumulator roots from chain data.
+    ///
+    /// A selective-disclosure proof is only meaningful because the verifier can
+    /// derive these themselves rather than trusting the prover's.
+    Roots {
+        /// Chain block to scan forward from. Defaults to the pruning point.
+        #[arg(long)]
+        from: Option<String>,
+        /// Instead, start this many chain batches before the tip. Cheap way to
+        /// inspect recent settlements without rebuilding the whole history.
+        #[arg(long)]
+        recent: Option<usize>,
+        /// Depth of the anchored tree; must match the circuit's.
+        #[arg(long, default_value_t = 20)]
+        depth: usize,
+        #[arg(long, default_value_t = 64)]
+        max_batches: usize,
+        /// Check a specific attestation id is present, as `<txid>:<index>/<id>`.
+        #[arg(long)]
+        expect: Option<String>,
+        #[arg(long)]
+        rpc: Option<String>,
     },
     /// Serve the reputation explorer locally.
     ///
@@ -1445,6 +1469,53 @@ fn main() -> Result<()> {
                 rpc_url: url,
             }
             .serve(&listen)?;
+        }
+        Cmd::Roots { from, recent, depth, max_batches, expect, rpc: rpc_url } => {
+            let url = rpc::endpoint(&rpc_url).ok_or_else(|| {
+                anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
+            })?;
+            let session = open_rpc(&url)?;
+            let start = match (&from, recent) {
+                (Some(h), _) => RpcHash::from_str(h).map_err(|e| anyhow!("bad --from: {e}"))?,
+                (None, Some(n)) => session.rt.block_on(roots::recent_start(&session.client, n))?,
+                (None, None) => session
+                    .rt
+                    .block_on(session.client.get_block_dag_info())
+                    .map_err(|e| anyhow!("get_block_dag_info: {e}"))?
+                    .pruning_point_hash,
+            };
+            let r = session.rt.block_on(roots::build(&session.client, start, max_batches, depth))?;
+            eprintln!(
+                "scanned {} blocks, {} accepted transactions{}",
+                r.blocks_scanned,
+                r.accepted_txs,
+                if r.reached_tip { ", reached the tip" } else { " — BUDGET EXHAUSTED, roots are partial" }
+            );
+            eprintln!("  anchored leaves {} | defaulted pseudonyms {}", r.anchored.len(), r.defaults.len());
+            if !r.reached_tip {
+                eprintln!(
+                    "A partial anchored root is worse than none: proofs from honest provers whose\n\
+                     settlement fell outside the window will fail. Raise --max-batches."
+                );
+            }
+            if let Some(spec) = &expect {
+                // "<txid>:<index>/<id>" — is this attestation in the set?
+                let (outpoint, id) =
+                    spec.split_once('/').ok_or_else(|| anyhow!("--expect is <txid>:<index>/<id>"))?;
+                let op = parse_outpoint(outpoint)?;
+                let leaf = krep_zk::scan::anchor_leaf(&op.txid, op.index, &parse_id(id)?);
+                match r.anchored.prove(&leaf) {
+                    Some(_) => eprintln!("  FOUND: that attestation is anchored in the rebuilt set"),
+                    None => eprintln!("  ABSENT: that attestation is not in the rebuilt set"),
+                }
+            }
+            println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+                "anchored_root": r.anchored.root().map(|f| krep_zk::hash::to_hex(&f)),
+                "defaults_root": krep_zk::hash::to_hex(&r.defaults.root()),
+                "anchored_leaves": r.anchored.len(),
+                "defaulted": r.defaults.len(),
+                "complete": r.reached_tip,
+            }))?);
         }
         Cmd::Job { cmd } => run_job(cmd)?,
         Cmd::Escrow { cmd } => run_escrow(cmd)?,

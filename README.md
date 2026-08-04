@@ -490,7 +490,7 @@ trading with itself manufactures real cost but not independent endorsement.
 And **covenant-witnessed entries** are marked `unsigned`: defaults nobody
 signed, which the subject could not refuse or omit.
 
-## M6 — selective disclosure (accumulators built, circuit pending)
+## M6 — selective disclosure
 
 SPEC 1.5 wants to prove *"this fresh key controls a chain with ≥N successes and
 0 defaults"* without revealing which chain, against "a global Merkle root of all
@@ -602,10 +602,45 @@ someone else's success claimed as your own    -> Failed assertion (belongs to an
 ```
 witnessed body and check it against the leaf, then check `owner == pseudonym`.
 
+### Rebuilding the roots from chain data
+
+```bash
+krep roots --rpc grpc://node:16110 --recent 20 --max-batches 20 \
+  --expect <txid>:<index>/<attestation id>
+```
+
+The proof only means anything because the verifier derives both roots
+themselves rather than accepting the prover's. This is the code that makes
+that true, and it reuses the same pure rules the circuit was built against, so
+what a verifier computes and what a prover proved against cannot drift.
+
+**The cost is real and worth stating.** Measured on testnet-10: roughly 23
+seconds per chain batch, so rebuilding a full pruning window (~470 batches)
+takes a few hours. That is a one-time cost — following the tip afterwards is
+cheap — but "anyone can maintain this" is a claim with a price attached, and
+anyone relying on it should know the number.
+
+Two bugs found while measuring it, both silent:
+
+- `build_fixed_depth` materialised all `2^depth` slots, about two million
+  permutations for a depth-20 tree holding four thousand leaves. Empty subtrees
+  have one value per height, so they are precomputed and only the occupied
+  prefix is hashed.
+- The body scan walked toward the tip regardless of where the acceptance window
+  ended, ignoring `--max-batches` entirely.
+
+Together: four minutes down to twenty-three seconds for the same window.
+
+A third was caught by a test rather than a stopwatch: `prove` paired an odd node
+with itself while `build_fixed_depth` padded with an empty subtree. Proofs
+against fixed-depth trees simply failed to verify, with nothing to indicate why.
+
 ## Next
 
-1. Finish the dogfood run's physical half.
-2. The Noir circuit over these accumulators.
+1. Finish the dogfood run's physical half — the only step needing hands.
+2. Real proof generation. `nargo execute` solves witnesses, which is what
+   demonstrates the constraints hold, but producing and verifying an actual
+   SNARK needs the Barretenberg backend (`bb`), not installed here.
 
 ## Deliberate design points (don't "fix" these)
 

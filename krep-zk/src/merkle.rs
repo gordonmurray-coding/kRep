@@ -14,9 +14,13 @@ use crate::hash::{hash_leaf, hash_node, Field};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MerkleTree {
-    /// Level 0 is the leaves; the last level holds the root alone.
+    /// Level 0 is the leaves; the last level holds the root alone. Only the
+    /// occupied prefix of each level is materialised.
     levels: Vec<Vec<Field>>,
     leaves: Vec<Field>,
+    /// Hash of an empty subtree at each height, for the unoccupied remainder.
+    /// Empty for minimal-depth trees, which have no padding.
+    empties: Vec<Field>,
 }
 
 /// A path from a leaf to the root.
@@ -30,28 +34,46 @@ pub struct MerkleProof {
 impl MerkleTree {
     /// Build to a fixed depth, padding with a designated empty leaf.
     ///
-    /// A circuit's array sizes are static, so it can only walk a path of one
-    /// known length. A minimal-depth tree whose shape follows the leaf count
-    /// would therefore need a different circuit for every accumulator size.
-    /// Fixing the depth decouples the two: the tree holds up to `2^depth`
-    /// leaves and every proof is exactly `depth` siblings long.
+    /// A circuit's array sizes are static, so it walks a path of one known
+    /// length; a minimal-depth tree whose shape follows the leaf count would
+    /// need a different circuit per accumulator size.
+    ///
+    /// The padding costs nothing. An empty subtree of a given height has one
+    /// value regardless of where it sits, so those are precomputed once and the
+    /// occupied prefix is the only thing actually hashed. Materialising all
+    /// `2^depth` slots instead — the obvious implementation, and the one this
+    /// replaced — meant about two million permutations for a depth-20 tree
+    /// holding four thousand leaves, which dominated everything else by orders
+    /// of magnitude.
     pub fn build_fixed_depth(values: impl IntoIterator<Item = Vec<u8>>, depth: usize) -> MerkleTree {
         let mut leaves: Vec<Field> = values.into_iter().map(|v| hash_leaf(&v)).collect();
         leaves.sort_unstable_by_key(|f| f.to_string());
         leaves.dedup();
-        let capacity = 1usize << depth;
-        assert!(leaves.len() <= capacity, "{} leaves exceed depth {depth}", leaves.len());
-        let real = leaves.len();
-        leaves.resize(capacity, empty_leaf());
+        assert!(leaves.len() <= 1usize << depth, "{} leaves exceed depth {depth}", leaves.len());
+
+        // Hash of an empty subtree at each height.
+        let mut empties = Vec::with_capacity(depth + 1);
+        empties.push(empty_leaf());
+        for level in 0..depth {
+            let below = empties[level];
+            empties.push(hash_node(&below, &below));
+        }
 
         let mut levels = vec![leaves.clone()];
-        for _ in 0..depth {
-            let prev = levels.last().expect("non-empty");
-            let next: Vec<Field> = prev.chunks(2).map(|p| hash_node(&p[0], &p[1])).collect();
+        for level in 0..depth {
+            let prev = &levels[level];
+            let filler = empties[level];
+            let mut next = Vec::with_capacity(prev.len().div_ceil(2));
+            for pair in prev.chunks(2) {
+                let right = pair.get(1).copied().unwrap_or(filler);
+                next.push(hash_node(&pair[0], &right));
+            }
+            if next.is_empty() {
+                next.push(empties[level + 1]);
+            }
             levels.push(next);
         }
-        leaves.truncate(real);
-        MerkleTree { levels, leaves }
+        MerkleTree { levels, leaves, empties }
     }
 
     /// Build from raw values. Sorted and de-duplicated, so the root depends
@@ -65,7 +87,7 @@ impl MerkleTree {
 
     fn from_sorted_leaves(leaves: Vec<Field>) -> MerkleTree {
         if leaves.is_empty() {
-            return MerkleTree { levels: vec![vec![]], leaves };
+            return MerkleTree { levels: vec![vec![]], leaves, empties: Vec::new() };
         }
         let mut levels = vec![leaves.clone()];
         while levels.last().expect("non-empty").len() > 1 {
@@ -80,7 +102,7 @@ impl MerkleTree {
             }
             levels.push(next);
         }
-        MerkleTree { levels, leaves }
+        MerkleTree { levels, leaves, empties: Vec::new() }
     }
 
     pub fn root(&self) -> Option<Field> {
@@ -103,9 +125,17 @@ impl MerkleTree {
     pub fn prove(&self, value: &[u8]) -> Option<MerkleProof> {
         let mut index = self.index_of(value)?;
         let mut siblings = Vec::with_capacity(self.levels.len());
-        for level in &self.levels[..self.levels.len() - 1] {
+        for (height, level) in self.levels[..self.levels.len() - 1].iter().enumerate() {
             let sibling = if index.is_multiple_of(2) {
-                *level.get(index + 1).unwrap_or(&level[index])
+                match (level.get(index + 1), self.empties.get(height)) {
+                    (Some(s), _) => *s,
+                    // Past the occupied prefix the sibling is an empty subtree.
+                    // A minimal-depth tree has no padding and pairs an odd node
+                    // with itself instead — the two must agree with how the
+                    // corresponding build filled it, or proofs silently fail.
+                    (None, Some(filler)) => *filler,
+                    (None, None) => level[index],
+                }
             } else {
                 level[index - 1]
             };
@@ -207,6 +237,34 @@ mod tests {
         let mut moved = good;
         moved.leaf_index ^= 1;
         assert!(!verify(&root, b"attestation-5", &moved));
+    }
+
+    #[test]
+    fn fixed_depth_proofs_verify_and_the_padding_is_free() {
+        // The padding optimisation must not change what the tree means: every
+        // member still proves, non-members still cannot, and the root is
+        // stable across however many empty slots follow.
+        for n in [1usize, 2, 3, 5, 16, 17] {
+            let values = vals(n);
+            let tree = MerkleTree::build_fixed_depth(values.clone(), 10);
+            let root = tree.root().expect("root");
+            assert_eq!(tree.len(), n);
+            for v in &values {
+                let proof = tree.prove(v).unwrap_or_else(|| panic!("{n}: no proof"));
+                assert_eq!(proof.siblings.len(), 10, "a fixed-depth path is always depth long");
+                assert!(verify(&root, v, &proof), "{n}: member failed to verify");
+            }
+            assert!(tree.prove(b"not-a-member").is_none());
+        }
+    }
+
+    #[test]
+    fn depth_changes_the_root_even_for_the_same_members() {
+        // A root is only meaningful alongside the depth it was built at, since
+        // the padding participates in it. Verifier and circuit must agree.
+        let a = MerkleTree::build_fixed_depth(vals(4), 8).root().unwrap();
+        let b = MerkleTree::build_fixed_depth(vals(4), 10).root().unwrap();
+        assert_ne!(a, b);
     }
 
     #[test]
