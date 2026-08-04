@@ -587,16 +587,23 @@ their own clean pseudonym.
 
 Closing it means proving `owner == pseudonym` per attestation, which means
 recomputing the attestation id from its body in-circuit, since the id is all the
-accumulator can hold. That id is `blake3(body ‖ signatures)`, and blake3 is
-neither in Noir's stdlib nor cheap in a circuit. Three ways out: bring blake3
-into the circuit from an external library (no format change, expensive); give
-attestations a second Poseidon2 id anchored alongside (32 more payload bytes and
-a domain-tag bump, cheap in-circuit); or re-key ids to Poseidon2 outright
-(cheapest, invalidates every chain anchored so far).
+accumulator can hold.
 
-That is a decision about kRep's attestation format rather than a circuit
-problem, so it is flagged rather than guessed at — the same way SPEC 1.5 flagged
-the unilateral-default problem that M2 then solved.
+**That is now possible.** Attestation ids are versioned by the body's own `v`
+field: v1 ids are blake3, v2 ids are Poseidon2 over the same body and
+signatures. New attestations are minted at v2, so a circuit can recompute one
+with a handful of permutations instead of a blake3 implementation Noir does not
+ship. Chains anchored under v1 keep verifying — the payloads that committed
+them can never be rewritten, and both the mainnet and testnet chains from
+M1–M4 still check out unchanged.
+
+Only the id changed. The body layout is untouched, and `signing_digest` stays
+blake3, because a circuit never needs to *verify* signatures — it only needs the
+id to bind to them, so that recomputing an id from a body proves that body is
+what the settlement anchored.
+
+**Still to build:** the circuit's binding step — recompute the v2 id from a
+witnessed body and check it against the leaf, then check `owner == pseudonym`.
 
 ## Next
 

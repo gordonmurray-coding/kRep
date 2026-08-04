@@ -573,7 +573,7 @@ pub fn settlement_body(
 ) -> Result<krep_core::AttestationBody> {
     let outpoint = parse_outpoint(&live.outpoint)?;
     Ok(krep_core::AttestationBody {
-        v: 1,
+        v: 2,
         anchor: krep_core::Outpoint {
             txid: outpoint.transaction_id.as_bytes(),
             index: outpoint.index,

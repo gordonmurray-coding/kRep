@@ -10,6 +10,7 @@
 //!   GPU rental payout) can anchor an attestation.
 
 pub mod chain;
+pub mod field;
 #[cfg(feature = "kaspad")]
 pub mod kaspad;
 
@@ -20,8 +21,16 @@ use thiserror::Error;
 
 /// Domain tag for signing digests. Bump the version on any layout change.
 pub const SIGN_DOMAIN: &str = "krep/attest/v1/sign";
-/// Domain tag for attestation ids (the value committed on-chain).
+/// Domain tag for v1 attestation ids (blake3). Kept so chains anchored before
+/// the change keep verifying — the payloads that committed them are immutable.
 pub const ID_DOMAIN: &str = "krep/attest/v1/id";
+/// Domain separator for v2 ids, absorbed into the Poseidon2 sponge.
+///
+/// v2 exists so a circuit can recompute an id from its body. The accumulator
+/// can only hold ids, so proving anything about an attestation's *contents*
+/// means rehashing the body in-circuit — and blake3 is neither in Noir's
+/// stdlib nor cheap there. Poseidon2 costs a handful of permutations.
+pub const ID_DOMAIN_V2: u128 = 0x6b7265702f61762f32; // "krep/av/2"
 /// Domain tag for ids of covenant-witnessed attestations. Deliberately distinct
 /// from [`ID_DOMAIN`] so a co-signed attestation and a covenant-witnessed one
 /// can never collide, and so existing v1 chains keep verifying unchanged.
@@ -238,7 +247,7 @@ impl AttestationBody {
     }
 
     pub fn validate_fields(&self) -> Result<()> {
-        if self.v != 1 {
+        if !(1..=2).contains(&self.v) {
             return Err(KrepError::BadField(format!("unsupported version {}", self.v)));
         }
         if !(1..=4).contains(&self.amount_bucket) {
@@ -347,11 +356,21 @@ impl Attestation {
 
     /// The 32-byte value committed in the settlement tx payload.
     ///
-    /// Co-signed ids are computed exactly as before, so chains anchored under
-    /// v1 keep verifying. Covenant-witnessed ids use a separate domain, so the
-    /// two forms cannot be confused for one another.
+    /// Which hash is used is decided by the body's own version field, so a
+    /// chain anchored under v1 keeps verifying against payloads that can never
+    /// be rewritten, while v2 attestations get an id a circuit can recompute.
     pub fn id(&self) -> [u8; 32] {
         match &self.auth {
+            Authorization::CoSigned { sig_owner, sig_counterparty } if self.body.v >= 2 => {
+                // Signatures are absorbed as opaque bytes. The circuit never
+                // verifies them — it only needs the id to bind to them, so that
+                // recomputing the id from a body proves that body is the one
+                // the settlement anchored.
+                let mut bytes = self.body.canonical_bytes();
+                bytes.extend_from_slice(sig_owner.as_ref());
+                bytes.extend_from_slice(sig_counterparty.as_ref());
+                field::hash_tagged_bytes(ID_DOMAIN_V2, &bytes)
+            }
             Authorization::CoSigned { sig_owner, sig_counterparty } => {
                 let mut h = blake3::Hasher::new_derive_key(ID_DOMAIN);
                 h.update(&self.body.canonical_bytes());

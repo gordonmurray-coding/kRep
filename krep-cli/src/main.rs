@@ -1264,7 +1264,9 @@ fn main() -> Result<()> {
             };
             let cp_bytes = hex::decode(&counterparty).context("bad counterparty hex")?;
             let body = AttestationBody {
-                v: 1,
+                // v2 ids are Poseidon2, so a circuit can recompute one from its
+                // body. v1 chains keep verifying; nothing new is minted at v1.
+                v: 2,
                 anchor: parse_outpoint(&anchor)?,
                 role: match role {
                     RoleArg::Provider => Role::Provider,

@@ -351,8 +351,10 @@ fn field_validation_rejects_malformed_bodies() {
     assert!(b.validate_fields().is_err(), "bucket 5 must be rejected");
 
     let mut b = body(&owner, &cp, 0, None, 1_700_000_000);
-    b.v = 2;
+    b.v = 3;
     assert!(b.validate_fields().is_err(), "unknown version must be rejected");
+    b.v = 2;
+    assert!(b.validate_fields().is_ok(), "v2 is the circuit-recomputable id scheme");
 
     let mut b = body(&owner, &cp, 0, None, 1_700_000_000);
     b.counterparty = xonly(&owner);
@@ -600,4 +602,76 @@ fn json_round_trips_and_v1_chains_still_parse() {
     let back: Attestation = serde_json::from_str(&json).unwrap();
     assert_eq!(back.id(), signed.id(), "v1 attestation ids must be unchanged");
     back.verify().unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// v2 ids — the scheme a circuit can recompute
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_body_version_selects_the_id_hash() {
+    let owner = kp("owner");
+    let cp = kp("cp0");
+
+    let mut v1 = body(&owner, &cp, 0, None, 1_700_000_000);
+    v1.v = 1;
+    let mut v2 = v1.clone();
+    v2.v = 2;
+
+    let a = cosign(&owner, &cp, v1);
+    let b = cosign(&owner, &cp, v2);
+
+    // Same parties, same trade, different id scheme — and the version is inside
+    // the signed bytes, so neither can be relabelled as the other.
+    assert_ne!(a.id(), b.id());
+    a.verify().unwrap();
+    b.verify().unwrap();
+}
+
+#[test]
+fn a_v2_id_still_binds_every_field_and_both_signatures() {
+    let owner = kp("owner");
+    let cp = kp("cp0");
+    let mut base = body(&owner, &cp, 0, None, 1_700_000_000);
+    base.v = 2;
+    let att = cosign(&owner, &cp, base.clone());
+    let id = att.id();
+
+    // Body fields.
+    for mutate in [
+        (|b: &mut AttestationBody| b.outcome = Outcome::Default) as fn(&mut AttestationBody),
+        |b: &mut AttestationBody| b.amount_bucket = 3,
+        |b: &mut AttestationBody| b.ts += 1,
+        |b: &mut AttestationBody| b.role = Role::Client,
+    ] {
+        let mut changed = base.clone();
+        mutate(&mut changed);
+        assert_ne!(cosign(&owner, &cp, changed).id(), id, "a v2 id must bind every body field");
+    }
+
+    // And the signatures. Swapping the two keeps the body byte-identical, so
+    // this isolates the question: does the id cover the signatures at all? An
+    // id that did not could be reused across a differently-signed object.
+    let swapped = Attestation::co_signed(
+        base,
+        *att.sig_counterparty().unwrap(),
+        *att.sig_owner().unwrap(),
+    );
+    assert_ne!(swapped.id(), id, "a v2 id must bind the signatures, not just the body");
+}
+
+#[test]
+fn a_v2_id_fits_the_payload_commitment_scheme() {
+    let owner = kp("owner");
+    let cp = kp("cp0");
+    let mut b = body(&owner, &cp, 0, None, 1_700_000_000);
+    b.v = 2;
+    let id = cosign(&owner, &cp, b).id();
+
+    // Still exactly 32 bytes, so `payload_commits` and the 64-byte terminal
+    // payload are unaffected by the change of hash.
+    assert_eq!(id.len(), 32);
+    // A field element rendered big-endian leaves the top bits clear; this is a
+    // property of the encoding, not an accident worth relying on elsewhere.
+    assert!(id[0] < 0x40, "a BN254 element never sets the top two bits");
 }
