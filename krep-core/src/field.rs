@@ -113,10 +113,20 @@ pub fn hash_tagged_bytes(tag: u128, value: &[u8]) -> [u8; 32] {
         fields.push(Field::from(u128::from_be_bytes(buf)));
     }
     fields.push(Field::from(value.len() as u128));
-    let out = sponge(tag, &fields);
+    to_be_32(&sponge(tag, &fields))
+}
+
+/// A field element as 32 big-endian bytes, left-padded.
+///
+/// The backend returns the minimal representation, so a small element comes
+/// back short. Anything comparing a field to a fixed-width value — an
+/// attestation id, a proof's public inputs — needs the padded form, and doing
+/// the padding at each call site is how the two disagree.
+pub fn to_be_32(f: &Field) -> [u8; 32] {
     let mut bytes = [0u8; 32];
-    let be = out.to_be_bytes();
-    bytes[32 - be.len()..].copy_from_slice(&be);
+    let be = f.to_be_bytes();
+    let n = be.len().min(32);
+    bytes[32 - n..].copy_from_slice(&be[be.len() - n..]);
     bytes
 }
 

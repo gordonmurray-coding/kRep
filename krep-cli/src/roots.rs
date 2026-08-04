@@ -23,6 +23,12 @@ pub const SLASH_SELECTOR: i64 = 7;
 pub struct Roots {
     pub anchored: MerkleTree,
     pub defaults: SparseMerkleTree,
+    /// The raw leaf values behind `anchored`, kept so a scan can be saved and
+    /// reused. A proof needs Merkle paths, not just the root, and rescanning the
+    /// chain for every proof would put the cost of one proof in hours.
+    pub leaves: Vec<Vec<u8>>,
+    /// The pseudonyms behind `defaults`, kept for the same reason.
+    pub defaulted: Vec<[u8; 32]>,
     pub blocks_scanned: usize,
     pub accepted_txs: usize,
     pub reached_tip: bool,
@@ -166,8 +172,10 @@ pub async fn build(
     }
 
     Ok(Roots {
-        anchored: MerkleTree::build_fixed_depth(leaves, depth),
-        defaults: SparseMerkleTree::from_keys(defaulted),
+        anchored: MerkleTree::build_fixed_depth(leaves.clone(), depth),
+        defaults: SparseMerkleTree::from_keys(defaulted.clone()),
+        leaves,
+        defaulted,
         blocks_scanned,
         accepted_txs,
         reached_tip,

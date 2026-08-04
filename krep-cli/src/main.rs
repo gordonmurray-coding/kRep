@@ -18,6 +18,7 @@ mod anchor;
 mod board;
 mod escrow;
 mod explore;
+mod prove;
 mod roots;
 mod rpc;
 
@@ -265,8 +266,51 @@ enum Cmd {
         /// Check a specific attestation id is present, as `<txid>:<index>/<id>`.
         #[arg(long)]
         expect: Option<String>,
+        /// Save the scan so proofs can be built and checked against it without
+        /// rescanning. A full window costs hours; this makes that a one-off.
+        #[arg(long)]
+        out: Option<PathBuf>,
         #[arg(long)]
         rpc: Option<String>,
+    },
+    /// Prove "I own N anchored successes and have never defaulted", revealing
+    /// neither the chain nor the pseudonym.
+    ///
+    /// The accumulator comes from `krep roots --out`, so what is proved against
+    /// is a scan of the chain rather than anything this command invented.
+    Prove {
+        /// The chain being vouched for. Never leaves this machine.
+        #[arg(long)]
+        chain: PathBuf,
+        /// A scan saved by `krep roots --out`.
+        #[arg(long)]
+        roots: PathBuf,
+        /// How many successes to claim. Claim the fewest that will do — a
+        /// larger number narrows who the prover could be.
+        #[arg(long, default_value_t = 1)]
+        min_successes: u32,
+        /// Where to write the proof bundle.
+        #[arg(long)]
+        out: PathBuf,
+        /// Write the witness and stop, without invoking the Noir toolchain.
+        #[arg(long)]
+        witness_only: bool,
+    },
+    /// Check a proof against roots you derived yourself.
+    ///
+    /// The prover's public inputs are discarded and rebuilt from your own scan,
+    /// so a proof about some other accumulator fails rather than being compared
+    /// against a number it supplied.
+    CheckProof {
+        #[arg(long)]
+        proof: PathBuf,
+        /// A scan you built yourself with `krep roots --out`.
+        #[arg(long)]
+        roots: PathBuf,
+        /// Successes you require. A proof of fewer is rejected here regardless
+        /// of what the prover claimed.
+        #[arg(long, default_value_t = 1)]
+        min_successes: u32,
     },
     /// Serve the reputation explorer locally.
     ///
@@ -1470,7 +1514,7 @@ fn main() -> Result<()> {
             }
             .serve(&listen)?;
         }
-        Cmd::Roots { from, recent, depth, max_batches, expect, rpc: rpc_url } => {
+        Cmd::Roots { from, recent, depth, max_batches, expect, out, rpc: rpc_url } => {
             let url = rpc::endpoint(&rpc_url).ok_or_else(|| {
                 anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
             })?;
@@ -1509,6 +1553,15 @@ fn main() -> Result<()> {
                     None => eprintln!("  ABSENT: that attestation is not in the rebuilt set"),
                 }
             }
+            if let Some(path) = &out {
+                let saved = prove::RootsFile::from_scan(&r, depth);
+                fs::write(path, serde_json::to_string(&saved)?)
+                    .with_context(|| format!("writing {}", path.display()))?;
+                eprintln!("  saved to {} — pass it to `krep prove` and `krep check-proof`", path.display());
+                if !r.reached_tip {
+                    eprintln!("  it is marked incomplete, and both commands will say so");
+                }
+            }
             println!("{}", serde_json::to_string_pretty(&serde_json::json!({
                 "anchored_root": r.anchored.root().map(|f| krep_zk::hash::to_hex(&f)),
                 "defaults_root": krep_zk::hash::to_hex(&r.defaults.root()),
@@ -1516,6 +1569,123 @@ fn main() -> Result<()> {
                 "defaulted": r.defaults.len(),
                 "complete": r.reached_tip,
             }))?);
+        }
+        Cmd::Prove { chain, roots: roots_path, min_successes, out, witness_only } => {
+            let chain: Chain = serde_json::from_str(&fs::read_to_string(&chain)?)
+                .with_context(|| "parsing the chain file")?;
+            chain.verify().context("this chain does not verify offline; there is nothing to prove")?;
+
+            let saved = prove::RootsFile::load(&roots_path)?;
+            if !saved.complete {
+                eprintln!(
+                    "!! that scan never reached the tip. Successes settled after it will look\n\
+                     !! unanchored, and this will refuse them. Rescan with a larger --max-batches."
+                );
+            }
+            let (anchored, defaults) = saved.trees()?;
+            let w = prove::witness(&chain, &anchored, &defaults, min_successes)?;
+            eprintln!(
+                "witness built: {} anchored success{} claimed against {} anchored leaves",
+                w.used,
+                if w.used == 1 { "" } else { "es" },
+                saved.anchored_leaves.len()
+            );
+
+            let dir = prove::circuit_dir();
+            fs::write(dir.join("Prover.toml"), &w.toml)?;
+            let Some(tools) = prove::find_toolchain() else {
+                bail!(
+                    "witness written to {}/Prover.toml, but nargo and bb were not found.\n\
+                     Install them and run:\n  nargo execute -p Prover.toml\n  \
+                     bb prove -b target/circuit.json -w target/circuit.gz -o target",
+                    dir.display()
+                )
+            };
+            if witness_only {
+                eprintln!("witness written to {}/Prover.toml", dir.display());
+                return Ok(());
+            }
+
+            eprintln!("executing the circuit…");
+            prove::run(&tools.nargo, &["execute", "-p", "Prover.toml"], &dir)?;
+            eprintln!("proving…");
+            let _ = fs::remove_dir_all(dir.join("target/proof"));
+            prove::run(
+                &tools.bb,
+                &["prove", "-b", "target/circuit.json", "-w", "target/circuit.gz", "-o", "target"],
+                &dir,
+            )?;
+            prove::run(&tools.bb, &["write_vk", "-b", "target/circuit.json", "-o", "target"], &dir)?;
+
+            let bundle = prove::ProofBundle {
+                min_successes,
+                proved_against_anchored_root: krep_zk::hash::to_hex(&w.anchored_root),
+                proved_against_defaults_root: krep_zk::hash::to_hex(&w.defaults_root),
+                proof: hex::encode(fs::read(dir.join("target/proof"))?),
+                vk: hex::encode(fs::read(dir.join("target/vk"))?),
+            };
+            // The point of the exercise is that this file identifies nobody. A
+            // leak here would be silent and total, so it is checked rather than
+            // asserted in a comment.
+            let encoded = serde_json::to_string_pretty(&bundle)?;
+            if encoded.contains(&hex::encode(w.pseudonym)) {
+                bail!("refusing to write: the bundle contains the pseudonym it is meant to hide");
+            }
+            fs::write(&out, &encoded)?;
+            eprintln!("proof written to {} ({} bytes)", out.display(), bundle.proof.len() / 2);
+            eprintln!("It names neither the chain nor the pseudonym. Send it to whoever asked.");
+        }
+        Cmd::CheckProof { proof, roots: roots_path, min_successes } => {
+            let bundle: prove::ProofBundle = serde_json::from_str(&fs::read_to_string(&proof)?)
+                .with_context(|| "parsing the proof bundle")?;
+            let saved = prove::RootsFile::load(&roots_path)?;
+            if !saved.complete {
+                eprintln!("!! your scan is partial, so an honest prover may fail this check");
+            }
+            let (anchored, defaults) = saved.trees()?;
+            let anchored_root = anchored.root().ok_or_else(|| anyhow!("your anchored set is empty"))?;
+
+            // The claim being checked is the verifier's, not the prover's. A
+            // prover who asked for 1 success does not get to satisfy a verifier
+            // who required 3 — so the public inputs are written from what the
+            // verifier wants and derived, and the prover's copy is never read.
+            if bundle.min_successes < min_successes {
+                bail!(
+                    "this proof claims {} success{}, fewer than the {min_successes} required",
+                    bundle.min_successes,
+                    if bundle.min_successes == 1 { "" } else { "es" }
+                );
+            }
+            let pi = prove::public_inputs(&anchored_root, &defaults.root(), bundle.min_successes);
+
+            let Some(tools) = prove::find_toolchain() else {
+                bail!("bb was not found, and a proof nobody verified is not evidence")
+            };
+            let dir = std::env::temp_dir().join(format!("krep-check-{}", std::process::id()));
+            fs::create_dir_all(&dir)?;
+            fs::write(dir.join("proof"), hex::decode(&bundle.proof)?)?;
+            fs::write(dir.join("vk"), hex::decode(&bundle.vk)?)?;
+            fs::write(dir.join("public_inputs"), &pi)?;
+            let verdict = prove::run(
+                &tools.bb,
+                &["verify", "-p", "proof", "-k", "vk", "-i", "public_inputs"],
+                &dir,
+            );
+            let _ = fs::remove_dir_all(&dir);
+            verdict.context(
+                "the proof does not hold against the roots you derived. Either it was built \
+                 against a different accumulator, or the claim is false",
+            )?;
+
+            eprintln!("roots derived from your own scan, not read from the proof:");
+            eprintln!("  anchored {}", krep_zk::hash::to_hex(&anchored_root));
+            eprintln!("  defaults {}", krep_zk::hash::to_hex(&defaults.root()));
+            println!(
+                "VERIFIED — the holder owns at least {} anchored success{} and is absent from the defaults.",
+                bundle.min_successes,
+                if bundle.min_successes == 1 { "" } else { "es" }
+            );
+            println!("Which chain, and which pseudonym, this proof does not say.");
         }
         Cmd::Job { cmd } => run_job(cmd)?,
         Cmd::Escrow { cmd } => run_escrow(cmd)?,

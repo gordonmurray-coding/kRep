@@ -649,6 +649,62 @@ is the property that makes the roots meaningful: a prover cannot substitute a
 defaults root that happens to omit them.
 witnessed body and check it against the leaf, then check `owner == pseudonym`.
 
+### Producing and checking a proof
+
+Everything above proved the circuit *works*. None of it was reachable by a user:
+the only way to get a witness was to hand-edit `Prover.toml` against fixtures
+written for the purpose, which demonstrates that the circuit compiles and
+nothing about whether its claim can be made from real data.
+
+```bash
+# once: rebuild the accumulators from a node and keep the scan
+krep roots --rpc grpc://node:16110 --out roots.json
+
+# the prover, holding a chain nobody else sees
+krep prove --chain mine.json --roots roots.json --min-successes 2 --out proof.json
+
+# the verifier, holding a scan they made themselves
+krep check-proof --proof proof.json --roots roots.json --min-successes 2
+```
+
+`--out` on `roots` exists because a full-window scan costs hours and a proof
+needs Merkle paths, not just a root. Both trees are a pure function of the leaf
+list and the defaulted-pseudonym list, so saving those two makes every proof
+after the first a local operation. Reloading rebuilds the trees and re-derives
+both roots; the saved values are a tripwire, not an input.
+
+**The verifier never reads the prover's public inputs.** They are the obvious
+thing to compare against, and comparing is the mistake — a forgotten check is
+invisible, and a prover who chooses their own roots can prove membership of a
+tree they invented. So `check-proof` writes the 96 public-input bytes from the
+roots *it* derived and hands `bb` the prover's proof against those. A proof
+built on any other accumulator fails, with no comparison to get wrong.
+
+Refusals happen while building the witness, not inside the circuit, so a prover
+is told which claim is false rather than handed a proof that mysteriously will
+not verify:
+
+| situation | what the prover is told |
+|---|---|
+| pseudonym is in the defaults set | recorded as having defaulted — that is the accumulator working, not a bug |
+| a success is outside the scanned window | not in the anchored set; either unanchored or outside the scan |
+| fewer successes than claimed | only N anchored successes available |
+| the scan never reached the tip | warned before anything else, since honest provers will fail against it |
+
+`krep prove` also refuses to write a bundle containing the pseudonym it exists
+to conceal. That leak would be silent and total, so it is checked rather than
+asserted in a comment.
+
+`nargo` and `bb` are external programs rather than crates. When they are absent
+the witness is still written and the two commands printed, so the milestone does
+not become unreachable for want of an installer.
+
+`krep-cli/tests/prove_roundtrip.rs` runs the whole loop offline — real
+attestations, real trees, real UltraHonk proof — and its last two cases are the
+ones worth having: the same proof checked against roots derived from a
+*different* scan must fail, and a proof of two successes must not satisfy a
+verifier demanding four.
+
 ### Rebuilding the roots from chain data
 
 ```bash
