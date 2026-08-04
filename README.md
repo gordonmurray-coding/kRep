@@ -747,6 +747,37 @@ themselves rather than accepting the prover's. This is the code that makes
 that true, and it reuses the same pure rules the circuit was built against, so
 what a verifier computes and what a prover proved against cannot drift.
 
+**Ids must sit at 32-byte-aligned payload offsets.** This rule used to be
+permissive — an id counted anywhere in a payload, on the reasoning that the
+format belongs to whichever protocol paid for the transaction. A full-window
+scan showed what that cost. The accumulator has to index every position an id
+*could* occupy, so a payload of length L produced L−31 leaves instead of L/32:
+
+| | unaligned | aligned |
+|---|---|---|
+| leaves in a 15,010-block window | 48,057 | 1,946 |
+| leaves per block | 3.2 | 0.13 |
+| blocks a depth-20 tree covers | ~327,000 (~9 hours) | ~8,090,000 (~9.4 days) |
+| full pruning window | 13,864,162 — **does not fit** | ~561,000, against 1,048,576 slots |
+
+The size was never driven by kRep. In that window, 223 outpoints out of 162,686
+accepted transactions produced every leaf, because a handful of payload-carrying
+transactions belonging to other protocols generated a few hundred each. Under
+the old rule the accumulator grew with everyone else's payload usage, and the
+depth-20 tree the circuit is built for could not span the range the design
+assumes it spans.
+
+Nothing already anchored is affected: `build_payload` writes `ids.concat()` and
+the escrow's terminal payload is the same 64 bytes, so ids land at offsets 0 and
+32. Both M4 chains still verify against a live node under the new rule. What is
+given up is a foreign protocol embedding a kRep id at an arbitrary offset in its
+own format — which nothing does, and which was not worth twenty-five times the
+accumulator.
+
+`payload_commits` in krep-core and `leaves_for_tx` in krep-zk must agree exactly
+or a chain verifies while being unprovable. They live in different crates, so a
+test asserts they give the same answer rather than trusting them to stay in step.
+
 **The cost is real and worth stating.** Measured on testnet-10: roughly 23
 seconds per chain batch, so rebuilding a full pruning window (~470 batches)
 takes a few hours. That is a one-time cost — following the tip afterwards is

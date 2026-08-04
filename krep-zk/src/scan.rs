@@ -41,11 +41,29 @@ pub fn anchor_leaf(outpoint_txid: &[u8; 32], outpoint_index: u32, id: &Digest32)
 
 /// Every leaf a single settled transaction contributes.
 ///
-/// For each outpoint the transaction spends, and each 32-byte window of its
-/// payload, one leaf. Windows are unaligned for the same reason
-/// `payload_commits` accepts unaligned matches: the payload format belongs to
-/// whichever protocol paid for the transaction, and kRep only asks that the id
-/// be in there somewhere.
+/// For each outpoint the transaction spends, and each **32-byte-aligned** slot
+/// of its payload, one leaf.
+///
+/// Alignment is what makes this accumulator tractable, and the cost of getting
+/// it wrong was measured rather than guessed. Scanning unaligned windows — the
+/// original rule, which asked only that an id be in the payload *somewhere* —
+/// turns a payload of length L into L−31 leaves instead of L/32. On testnet-10
+/// that was 48,057 leaves where 1,611 would do, a factor of 30, and a full
+/// pruning window came to 13.9 million leaves against the 1,048,576 a depth-20
+/// tree holds. The tree could not cover the range the design assumes it covers.
+///
+/// The size was never driven by kRep. In a 15,009-block sample, 223 outpoints
+/// out of 163,396 accepted transactions produced every leaf, because a handful
+/// of payload-carrying transactions belonging to other protocols each generated
+/// a few hundred. Under the old rule the accumulator grew with everyone else's
+/// payload usage.
+///
+/// Nothing kRep anchors is affected: `build_payload` writes `ids.concat()`, so
+/// ids sit at offsets 0 and 32, and the escrow's terminal payload is the same 64
+/// bytes. Both are aligned, so every anchor ever made still counts. What is
+/// given up is a foreign protocol embedding a kRep id at an arbitrary offset in
+/// its own format — which nothing does, and which was never worth thirty times
+/// the accumulator.
 pub fn leaves_for_tx(spent: &[([u8; 32], u32)], payload: &[u8]) -> Vec<Vec<u8>> {
     if payload.len() < 32 || spent.is_empty() {
         return Vec::new();
@@ -53,8 +71,8 @@ pub fn leaves_for_tx(spent: &[([u8; 32], u32)], payload: &[u8]) -> Vec<Vec<u8>> 
     let scanned = &payload[..payload.len().min(MAX_PAYLOAD_SCANNED)];
     let mut out = Vec::new();
     for (txid, index) in spent {
-        for window in scanned.windows(32) {
-            let id: Digest32 = window.try_into().expect("windows(32) yields 32 bytes");
+        for slot in scanned.chunks_exact(32) {
+            let id: Digest32 = slot.try_into().expect("chunks_exact(32) yields 32 bytes");
             out.push(anchor_leaf(txid, *index, &id));
         }
     }
@@ -244,7 +262,40 @@ mod tests {
         // And an enormous payload is bounded rather than expanded wholesale.
         let huge = vec![0u8; MAX_PAYLOAD_SCANNED * 4];
         let n = leaves_for_tx(&[([1u8; 32], 0)], &huge).len();
-        assert_eq!(n, MAX_PAYLOAD_SCANNED - 31);
+        assert_eq!(n, MAX_PAYLOAD_SCANNED / 32);
+    }
+
+    #[test]
+    fn only_aligned_slots_become_leaves() {
+        // The measurement that motivated this: a payload of length L used to
+        // yield L-31 leaves and now yields L/32. At the sizes actually seen on
+        // testnet-10 that is the difference between a tree that holds a pruning
+        // window and one that does not.
+        let payload = vec![0u8; 320];
+        assert_eq!(leaves_for_tx(&[([1u8; 32], 0)], &payload).len(), 10);
+
+        // A trailing partial slot contributes nothing, so an id cannot be
+        // indexed at a position the verifier would refuse.
+        let ragged = vec![0u8; 320 + 20];
+        assert_eq!(leaves_for_tx(&[([1u8; 32], 0)], &ragged).len(), 10);
+
+        // Every input still gets its own leaf per slot: the outpoint is part of
+        // the leaf, and which one anchored the id is not known here.
+        let two = [([1u8; 32], 0), ([2u8; 32], 1)];
+        assert_eq!(leaves_for_tx(&two, &payload).len(), 20);
+    }
+
+    #[test]
+    fn a_real_settlement_payload_is_indexed_at_both_slots() {
+        // What kRep actually writes: `ids.concat()`, one or two ids. Both sit
+        // at aligned offsets, so the change costs nothing already anchored.
+        let (a, b) = ([0xa1u8; 32], [0xb2u8; 32]);
+        let mut payload = a.to_vec();
+        payload.extend_from_slice(&b);
+        let leaves = leaves_for_tx(&[([9u8; 32], 0)], &payload);
+        assert_eq!(leaves.len(), 2);
+        assert!(leaves.contains(&anchor_leaf(&[9u8; 32], 0, &a)));
+        assert!(leaves.contains(&anchor_leaf(&[9u8; 32], 0, &b)));
     }
 
     #[test]

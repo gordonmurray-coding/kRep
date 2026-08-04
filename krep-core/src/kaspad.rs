@@ -416,14 +416,23 @@ impl KaspadAnchorVerifier {
 
 /// Does `payload` commit `id`?
 ///
-/// Any 32-byte-aligned-or-not occurrence counts. This is deliberately
-/// permissive: the payload format belongs to whatever settlement protocol paid
-/// for the transaction (a FabMesh escrow release, a kUSD liquidation, a plain
-/// `krep anchor`), and kRep only asks that the id be in there. Mirror
-/// attestations put two ids in one 64-byte payload; both verify against the
-/// same transaction.
+/// The id must sit at a **32-byte-aligned** offset. This used to accept a match
+/// anywhere, on the reasoning that the payload format belongs to whatever
+/// settlement protocol paid for the transaction. That permissiveness turned out
+/// to cost about thirty times the size of the M6 accumulator, which indexes
+/// every position an id could occupy — see `krep_zk::scan::leaves_for_tx` for
+/// the measurement.
+///
+/// This rule and that one must stay identical. If the verifier accepted a match
+/// the accumulator does not index, a chain would verify while being unprovable;
+/// the reverse would put leaves in the tree for ids no verifier would honour.
+///
+/// Nothing kRep writes is affected — `build_payload` emits `ids.concat()` and
+/// the escrow's terminal payload is the same 64 bytes, so ids land at offsets 0
+/// and 32. Mirror attestations still put two ids in one payload and both still
+/// verify against the same transaction.
 pub fn payload_commits(payload: &[u8], id: &[u8; 32]) -> bool {
-    payload.windows(32).any(|w| w == id)
+    payload.chunks_exact(32).any(|w| w == id)
 }
 
 impl AnchorVerifier for KaspadAnchorVerifier {
@@ -664,10 +673,46 @@ mod tests {
         assert!(payload_commits(&both, &other));
         assert!(!payload_commits(&both, &[1u8; 32]));
 
-        // Unaligned placement inside a larger protocol payload still counts.
+        // Unaligned placement does NOT count. It used to, and that cost about
+        // thirty times the size of the M6 accumulator, which has to index every
+        // position an id could occupy. Nothing kRep writes is unaligned.
         let mut embedded = vec![0xde, 0xad, 0xbe];
         embedded.extend_from_slice(&id);
         embedded.extend_from_slice(b"trailing");
-        assert!(payload_commits(&embedded, &id));
+        assert!(!payload_commits(&embedded, &id), "unaligned ids must not commit");
+
+        // A trailing partial slot is not a place an id can hide either.
+        let mut ragged = vec![0u8; 32];
+        ragged.extend_from_slice(&id[..20]);
+        assert!(!payload_commits(&ragged, &id));
+
+        // Aligned at a later slot, which is where a longer protocol payload
+        // would legitimately put one.
+        let mut later = vec![0u8; 64];
+        later.extend_from_slice(&id);
+        assert!(payload_commits(&later, &id));
+    }
+
+    /// The verifier and the accumulator must agree on what counts, or a chain
+    /// verifies while being unprovable — the two rules living in different
+    /// crates is exactly how they would drift apart unnoticed.
+    #[test]
+    fn the_verifier_and_the_accumulator_agree_on_placement() {
+        let id = [0x5au8; 32];
+        for prefix in [0usize, 3, 32, 64, 70] {
+            let mut payload = vec![0u8; prefix];
+            payload.extend_from_slice(&id);
+            payload.extend_from_slice(b"tail");
+            let commits = payload_commits(&payload, &id);
+            let indexed = krep_zk_leaf_rule(&payload, &id);
+            assert_eq!(commits, indexed, "disagreement at prefix {prefix}");
+        }
+    }
+
+    /// `krep_zk::scan::leaves_for_tx`'s rule, restated. krep-core cannot depend
+    /// on krep-zk (the dependency runs the other way), so the check is that the
+    /// two definitions produce the same answer, not that there is one copy.
+    fn krep_zk_leaf_rule(payload: &[u8], id: &[u8; 32]) -> bool {
+        payload.chunks_exact(32).any(|slot| slot == id)
     }
 }
