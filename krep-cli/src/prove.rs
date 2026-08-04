@@ -110,18 +110,25 @@ impl RootsFile {
     }
 }
 
-/// A proof, with everything a verifier needs except the roots — which it is
-/// expected to derive, and which are therefore deliberately absent as inputs.
+/// A proof, and nothing a verifier is expected to take on faith.
 ///
-/// The roots recorded here are a courtesy for reading the file, never consumed
-/// by verification.
+/// Note what is *not* here: no verification key. A vk says which circuit was
+/// proved, so a verifier accepting one from the prover has let the prover choose
+/// what was proved — and the attack is not subtle. Write a circuit with these
+/// same three public inputs and no assertions at all, set them to the roots the
+/// verifier will derive (they are public), prove it. That proof is valid, the
+/// same 14,656 bytes, and against its own key it verifies. It establishes
+/// nothing. `check-proof` therefore derives the key from its own embedded copy
+/// of the circuit, and there is no field here for a prover to fill.
+///
+/// The roots recorded below are a courtesy for reading the file. Verification
+/// never consumes them either.
 #[derive(Serialize, Deserialize)]
 pub struct ProofBundle {
     pub min_successes: u32,
     pub proved_against_anchored_root: String,
     pub proved_against_defaults_root: String,
     pub proof: String,
-    pub vk: String,
 }
 
 /// The 96 bytes `bb` expects: three field elements, big-endian.

@@ -1633,7 +1633,6 @@ fn main() -> Result<()> {
                 proved_against_anchored_root: krep_zk::hash::to_hex(&w.anchored_root),
                 proved_against_defaults_root: krep_zk::hash::to_hex(&w.defaults_root),
                 proof: hex::encode(fs::read(dir.join("target/proof"))?),
-                vk: hex::encode(fs::read(dir.join("target/vk"))?),
             };
             // The point of the exercise is that this file identifies nobody. A
             // leak here would be silent and total, so it is checked rather than
@@ -1670,22 +1669,28 @@ fn main() -> Result<()> {
             let pi = prove::public_inputs(&anchored_root, &defaults.root(), bundle.min_successes);
 
             let Some(tools) = prove::find_toolchain() else {
-                bail!("bb was not found, and a proof nobody verified is not evidence")
+                bail!("nargo and bb were not found, and a proof nobody verified is not evidence")
             };
-            let dir = std::env::temp_dir().join(format!("krep-check-{}", std::process::id()));
-            fs::create_dir_all(&dir)?;
+
+            // Compile our own copy of the circuit and derive the key from that.
+            // Taking the key from the prover would let them prove a circuit of
+            // their choosing — including one with no assertions in it at all.
+            let scratch = prove::Scratch::new("check")?;
+            let dir = scratch.path().to_path_buf();
+            eprintln!("deriving the verification key from this build's circuit…");
+            prove::run(&tools.nargo, &["compile"], &dir)?;
+            prove::run(&tools.bb, &["write_vk", "-b", "target/circuit.json", "-o", "target"], &dir)?;
+
             fs::write(dir.join("proof"), hex::decode(&bundle.proof)?)?;
-            fs::write(dir.join("vk"), hex::decode(&bundle.vk)?)?;
             fs::write(dir.join("public_inputs"), &pi)?;
-            let verdict = prove::run(
+            prove::run(
                 &tools.bb,
-                &["verify", "-p", "proof", "-k", "vk", "-i", "public_inputs"],
+                &["verify", "-p", "proof", "-k", "target/vk", "-i", "public_inputs"],
                 &dir,
-            );
-            let _ = fs::remove_dir_all(&dir);
-            verdict.context(
-                "the proof does not hold against the roots you derived. Either it was built \
-                 against a different accumulator, or the claim is false",
+            )
+            .context(
+                "the proof does not hold. Either it was built against a different accumulator \
+                 than the one you derived, or against a different circuit, or the claim is false",
             )?;
 
             eprintln!("roots derived from your own scan, not read from the proof:");

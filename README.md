@@ -673,7 +673,26 @@ list and the defaulted-pseudonym list, so saving those two makes every proof
 after the first a local operation. Reloading rebuilds the trees and re-derives
 both roots; the saved values are a tripwire, not an input.
 
-**The verifier never reads the prover's public inputs.** They are the obvious
+**The verifier derives the verification key too, not just the roots.** This was
+a hole in the first version of these commands, caught by asking what a `vk` in
+the bundle was actually for. A verification key says *which circuit* was proved,
+so a verifier that accepts one from the prover has let the prover choose what
+was proved. The attack is not subtle:
+
+```
+fn main(anchored_root: pub Field, defaults_root: pub Field, min_successes: pub u32) {}
+```
+
+Same three public inputs, no assertions at all. Set them to the roots the
+verifier will derive — they are public — and prove it. The result is a valid
+14,656-byte proof, indistinguishable in size and shape from an honest one, and
+against its own key it verifies. It establishes nothing whatsoever, and the
+first version of `check-proof` printed VERIFIED for it. There is now no vk field
+in the bundle for a prover to fill; the key is derived from the circuit compiled
+into the binary, and `krep-cli/tests/prove_roundtrip.rs` builds that exact
+attack and requires it to be rejected.
+
+**The verifier never reads the prover's public inputs either.** They are the obvious
 thing to compare against, and comparing is the mistake — a forgotten check is
 invisible, and a prover who chooses their own roots can prove membership of a
 tree they invented. So `check-proof` writes the 96 public-input bytes from the

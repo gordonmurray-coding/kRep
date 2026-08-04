@@ -159,6 +159,82 @@ fn prove_then_check_against_independently_derived_roots() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A verification key says *which circuit* was proved. A verifier that takes
+/// one from the prover has therefore let the prover choose what was proved.
+///
+/// The attack needs nothing clever: write a circuit with the same three public
+/// inputs and no assertions at all, set those inputs to the roots the verifier
+/// will derive — they are public — and prove it. The proof is valid, the same
+/// 14,656 bytes, and against its own vk it verifies. It establishes nothing.
+#[test]
+fn a_proof_of_a_circuit_that_asserts_nothing_is_rejected() {
+    if std::env::var("KREP_TEST_PROVE").is_err() {
+        eprintln!("set KREP_TEST_PROVE=1 to run (needs nargo + bb)");
+        return;
+    }
+    let dir = std::env::temp_dir().join("krep-prove-permissive");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("circuit/src")).unwrap();
+
+    let (me, buyer) = (kp("attacker"), kp("buyer"));
+    let mine = chain_of(&me, &buyer, &[[0xd1; 32]]);
+    let roots_body = roots_json(&[&mine], vec![], 10);
+    let roots_path = write(&dir, "roots.json", &roots_body);
+    let roots: serde_json::Value = serde_json::from_str(&roots_body).unwrap();
+
+    let circuit = dir.join("circuit");
+    std::fs::write(
+        circuit.join("Nargo.toml"),
+        "[package]\nname = \"circuit\"\ntype = \"bin\"\nauthors = [\"\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        circuit.join("src/main.nr"),
+        "fn main(anchored_root: pub Field, defaults_root: pub Field, min_successes: pub u32) {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        circuit.join("Prover.toml"),
+        format!(
+            "anchored_root = \"{}\"\ndefaults_root = \"{}\"\nmin_successes = \"1\"\n",
+            roots["anchored_root"].as_str().unwrap(),
+            roots["defaults_root"].as_str().unwrap()
+        ),
+    )
+    .unwrap();
+
+    let sh = |prog: &str, args: &[&str]| {
+        let out = Command::new(prog).args(args).current_dir(&circuit).output().expect(prog);
+        assert!(out.status.success(), "{prog}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    sh("nargo", &["execute", "-p", "Prover.toml"]);
+    sh("bb", &["write_vk", "-b", "target/circuit.json", "-o", "target"]);
+    sh("bb", &["prove", "-b", "target/circuit.json", "-w", "target/circuit.gz", "-o", "target"]);
+
+    let bundle = serde_json::json!({
+        "min_successes": 1,
+        "proved_against_anchored_root": roots["anchored_root"],
+        "proved_against_defaults_root": roots["defaults_root"],
+        "proof": hex::encode(std::fs::read(circuit.join("target/proof")).unwrap()),
+        "vk": hex::encode(std::fs::read(circuit.join("target/vk")).unwrap()),
+    });
+    let proof_path = write(&dir, "proof.json", &bundle.to_string());
+
+    let out = krep(&[
+        "check-proof",
+        "--proof", proof_path.to_str().unwrap(),
+        "--roots", roots_path.to_str().unwrap(),
+        "--min-successes", "1",
+    ]);
+    assert!(
+        !out.status.success(),
+        "a proof of a circuit with no constraints was accepted:\n{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_slashed_pseudonym_is_refused_before_any_proving_happens() {
     // No toolchain needed: this must fail while building the witness, so a
