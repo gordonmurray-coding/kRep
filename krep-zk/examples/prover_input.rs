@@ -2,6 +2,12 @@
 //! co-signed v2 attestations and real accumulators, so the circuit is exercised
 //! against the code a verifier runs rather than hand-written fixtures.
 //!
+//! Run as `cargo run -p krep-zk --example prover_input > Prover.toml`. The
+//! output is not checked in: a witness names a pseudonym and carries every body
+//! in full, and a file of that shape does not belong in a source tree even when
+//! the pseudonyms in it are invented. This exists to exercise the circuit
+//! directly; `krep prove` is the path for a real chain.
+//!
 //! `KREP_SUBJECT=defaulter` emits the case the circuit must refuse: a pseudonym
 //! that really was slashed trying to prove a clean record.
 //! `KREP_TAMPER=owner` emits a prover pairing somebody else's anchored success

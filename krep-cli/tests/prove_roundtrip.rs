@@ -5,9 +5,8 @@
 //! path: real co-signed v2 attestations, the real Merkle and sparse trees, the
 //! real circuit, and a real UltraHonk proof.
 //!
-//! Gated on `$KREP_TEST_PROVE` because proving takes tens of seconds and needs
-//! `nargo` and `bb` installed. It also writes `Prover.toml` into the circuit
-//! directory, so it must not run beside anything else that proves.
+//! Gated on `$KREP_TEST_PROVE` because proving needs `nargo` and `bb` installed
+//! and takes a few seconds per case.
 //!
 //! What it is really for is the last test: a proof that verifies against the
 //! roots it was built from must *fail* against roots someone else derived. If
