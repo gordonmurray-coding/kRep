@@ -8,7 +8,7 @@
 //! Both derivations reuse the pure rules in `krep_zk::scan`, so what a verifier
 //! computes here and what a prover proved against cannot drift apart.
 
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, bail, Result};
 use kaspa_rpc_core::api::rpc::RpcApi;
 use kaspa_rpc_core::RpcHash;
 use krep_zk::merkle::MerkleTree;
@@ -109,6 +109,7 @@ pub async fn build(
     let mut pending_slashes: Vec<(RpcHash, Vec<u8>)> = Vec::new();
     let mut blocks_scanned = 0usize;
     let mut accepted_txs = 0usize;
+    let capacity = 1usize << depth;
     let mut low = Some(start);
 
     loop {
@@ -136,6 +137,26 @@ pub async fn build(
                     .map(|i| (i.previous_outpoint.transaction_id.as_bytes(), i.previous_outpoint.index))
                     .collect();
                 leaves.extend(leaves_for_tx(&spent, &tx.payload));
+                // Check the capacity as we go. The tree's depth is fixed by the
+                // circuit, and discovering the set does not fit only at the end
+                // means discovering it after hours of scanning — which is how
+                // this was found. Deduplicating first, since only distinct
+                // leaves occupy slots and the raw count runs well ahead of them.
+                if leaves.len() > capacity {
+                    leaves.sort_unstable();
+                    leaves.dedup();
+                    if leaves.len() > capacity {
+                        let needed = usize::BITS - (leaves.len() - 1).leading_zeros();
+                        bail!(
+                            "the anchored set outgrew the tree: {} distinct leaves after {blocks_scanned} \
+                             blocks, but depth {depth} holds {capacity}.\n\
+                             This range needs at least depth {needed}, which the circuit must also be \
+                             built for — ANCHOR_DEPTH in krep-zk/circuit/src/main.nr.\n\
+                             Scan a shorter range with --recent, or raise both.",
+                            leaves.len()
+                        );
+                    }
+                }
 
                 for input in &tx.inputs {
                     if branch_selector(&input.signature_script) == Some(SLASH_SELECTOR) {

@@ -95,6 +95,19 @@ impl RootsFile {
             let b = hex::decode(h).map_err(|e| anyhow!("bad pseudonym hex: {e}"))?;
             keys.push(<[u8; 32]>::try_from(&b[..]).map_err(|_| anyhow!("pseudonym must be 32 bytes"))?);
         }
+        // A saved scan is a file, and a file can be too big for the tree it
+        // claims to describe. Reaching build_fixed_depth with more leaves than
+        // slots is a panic, and a panic on someone else's input is not a
+        // diagnosis.
+        let capacity = 1usize << self.depth;
+        if leaves.len() > capacity {
+            bail!(
+                "this scan holds {} leaves but depth {} has {capacity} slots — it cannot have \
+                 come from a working `krep roots`",
+                leaves.len(),
+                self.depth
+            );
+        }
         let anchored = MerkleTree::build_fixed_depth(leaves, self.depth);
         let defaults = SparseMerkleTree::from_keys(keys);
 
