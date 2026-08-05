@@ -336,6 +336,26 @@ A covenant witness may never carry a `Success` — otherwise driving your own
 covenant would be a way to mint praise. It is only ever an answer to "the
 subject would refuse to sign this".
 
+**Timed branches wait longer than they look.** Slash and refund set the
+transaction's lock time to the deadline they unlock at, and consensus requires a
+lock time to be strictly in the past — equality does not count. So the natural
+move, submitting the instant the deadline arrives, comes back as
+`transaction input #0 is not finalized`, which reads like a signing or covenant
+fault and is neither. Nothing can be built around it: the covenant's own
+`CheckLockTimeVerify` requires `lock_time >= deadline`, so the wait is real.
+What was missing was being told, and every timed branch now says how long is
+left rather than handing the node a transaction it will refuse:
+
+```
+Error: this branch unlocks at DAA 535365483 and the chain is at 535362927.
+Consensus requires the lock time to be strictly in the past, so it is 2557
+scores — roughly 256s at 10 BPS — before this can be submitted.
+Nothing is wrong with the escrow; it is not time yet.
+```
+
+Found by driving a slash on testnet rather than by reading the code. Ship never
+hits it, because `shipped_at` is already backed off 64 scores.
+
 ## M3 — the job board
 
 Postings, claims and acceptances are Nostr events. No server of record, nobody

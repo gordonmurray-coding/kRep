@@ -224,6 +224,34 @@ async fn transition(
     payload: Vec<u8>,
     lock_time: u64,
 ) -> Result<(Transaction, Live)> {
+    // A timed branch becoming *available* and its transaction becoming
+    // *submittable* are not the same moment, and the gap is easy to walk into.
+    // Slash and refund set lock_time to the deadline they unlock at, and
+    // consensus requires the lock time to be strictly in the past — equality
+    // does not count. So the natural thing to do, submitting the instant the
+    // deadline arrives, gets `transaction input #0 is not finalized` back from
+    // the node, which reads like a signing or covenant fault and is neither.
+    //
+    // Nothing can be built around it: the covenant's own CheckLockTimeVerify
+    // requires lock_time >= deadline, so the wait is real. What was missing was
+    // being told about it. Checking here rather than at submit has no race,
+    // because the DAA score only ever climbs.
+    if lock_time > 0 {
+        let dag = rpc.get_block_dag_info().await.map_err(|e| anyhow!("get_block_dag_info: {e}"))?;
+        if dag.virtual_daa_score <= lock_time {
+            let short = lock_time - dag.virtual_daa_score + 1;
+            bail!(
+                "this branch unlocks at DAA {lock_time} and the chain is at {}.\n\
+                 Consensus requires the lock time to be strictly in the past, so it is {short} \
+                 score{} — roughly {:.0}s at 10 BPS — before this can be submitted.\n\
+                 Nothing is wrong with the escrow; it is not time yet.",
+                dag.virtual_daa_score,
+                if short == 1 { "" } else { "s" },
+                short as f64 / 10.0
+            );
+        }
+    }
+
     let network = rpc.get_current_network().await.map_err(|e| anyhow!("get_current_network: {e}"))?;
     let prefix = kaspa_addresses::Prefix::from(network);
     let (addr, _) = wallet_utxos(rpc, key, prefix).await?;
@@ -343,9 +371,10 @@ pub async fn ship(
     //
     // It has to be strictly in the past: a transaction whose lock time has not
     // yet passed is "not finalized" and gets rejected, and lock_time equal to
-    // the current DAA score counts as not yet passed. Backing off costs about a
-    // second of the buyer's dispute window at 10 BPS and makes the transaction
-    // acceptable immediately.
+    // the current DAA score counts as not yet passed. Backing off 64 costs
+    // about six seconds of the buyer's dispute window at 10 BPS and makes the
+    // transaction acceptable immediately, which is why ship never hits the
+    // wait that slash and refund can.
     let dag = rpc.get_block_dag_info().await.map_err(|e| anyhow!("{e}"))?;
     let now = dag.virtual_daa_score.saturating_sub(64);
     let state = EscrowState {
