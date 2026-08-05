@@ -438,7 +438,20 @@ been run end to end:
 | maker bonds in | `1d9a11921a6bd13ea2d53aa614af0128ec6f40cd5f97a9d34f6b387e0acb0335` |
 
 Completed with a **simulated shipment** — the tracking number is labelled as
-such rather than dressed up as real:
+such rather than dressed up as real.
+
+Two things about that shipped state are wrong, and neither can be corrected: it
+is anchored in a settled escrow, which is the property the whole system exists
+to provide. The tracking number was invented, and the hash committing to it was
+not the documented blake3 — nothing here could compute blake3 at the time. Both
+are recorded rather than quietly left out.
+
+Neither matters downstream. The covenant requires only that the tracking hash be
+non-zero; it never sees the preimage, so it cannot check which function produced
+one. No attestation, score or proof reads the field. Unlike the design-file
+hash, nobody ever recomputes it and compares — a convention mismatch here is
+inert, where there it would have broken a real job. A run that follows the
+convention throughout needs a fresh escrow, not an edit to this one.
 
 | step | result |
 |---|---|
