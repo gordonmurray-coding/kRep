@@ -68,13 +68,20 @@ still working turns an honest job into a slashable one. Hours, not minutes.
 **3. B posts it, M finds it.**
 
 ```bash
-krep job post   --escrow job.json --seed b.seed --relay wss://nos.lol
+# B posts. Reward, bond, deadline and file hash come from the escrow, so the
+# posting cannot advertise terms the escrow will not honour.
+krep job post --escrow job.json --seed b.seed --context fabmesh \
+  --job-id <stable id> --process fdm --material PLA --region EU \
+  --file-ptr <where the encrypted design lives> --relay wss://nos.lol
+
+# M finds it, then re-checks it against the escrow that holds the money.
 krep job list   --relay wss://nos.lol
-krep job verify --escrow-address <from the posting> --relay wss://nos.lol
+krep job verify --job-addr 30402:<B's pubkey>:<job id> --escrow job.json --relay wss://nos.lol
 ```
 
-`job verify` is M checking that the advertised reward, bond, deadline and file
-hash match the escrow that actually holds the money. The posting is words on a
+`job verify` catches a posting advertising terms the escrow will not honour. It
+cannot catch a wrong hash *function*, because the posting and the escrow derive
+from the same value — that is what step 1 is for. The posting is words on a
 relay; the address is the only thing that pays.
 
 **4. B scores M before accepting.** This is the step the whole project exists
@@ -103,10 +110,26 @@ krep escrow ship --escrow job.json --wallet m.wallet --tracking <that hash> \
   --rpc grpc://node:16110 --submit
 ```
 
-**7. B settles.** Both reputations are minted by one transaction:
+**7. Both parties build their own attestation, and sign the other's.** A
+settlement carries the ids, so these must exist before it:
 
 ```bash
-krep escrow settle --escrow job.json --wallet b.wallet --rpc grpc://node:16110 --submit
+# each side derives the entry this escrow owes them, from their pseudonym
+krep escrow attest --escrow job.json --seed m.seed --context fabmesh > m.part.json   # M
+krep escrow attest --escrow job.json --seed b.seed --context fabmesh > b.part.json   # B
+
+# each countersigns the other's; neither can mint reputation alone
+krep countersign --seed b.seed --context fabmesh < m.part.json > m.att.json          # B signs M's
+krep countersign --seed m.seed --context fabmesh < b.part.json > b.att.json          # M signs B's
+```
+
+**8. B settles.** One transaction pays out and anchors both reputations:
+
+```bash
+krep escrow settle --escrow job.json --wallet b.wallet \
+  --att m.att.json --att b.att.json --rpc grpc://node:16110 --submit
+
+krep append --chain m.chain.json < m.att.json
 krep verify --chain m.chain.json --rpc grpc://node:16110
 ```
 
@@ -143,6 +166,14 @@ newline and will not match.
 
 One person cannot find a bug of this shape. That is the argument for this
 document.
+
+Every command above was corrected against a run that actually executed them. The
+first draft was written from memory and had three that would have failed on
+contact: `job post` missing its required arguments, `job verify` taking an
+`--escrow-address` that does not exist, and `settle` given no `--att` files at
+all — with the attestation and countersigning steps missing entirely, so the
+settlement had nothing to anchor. A runbook nobody has run is a guess, and the
+person it fails for is the one least able to tell whether it is their mistake.
 
 The README's *reference run* is this runbook driven end to end on testnet-10,
 with every hash computed by `krep hash`. Copy its values to check your own setup
