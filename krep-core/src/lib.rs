@@ -205,7 +205,7 @@ mod schnorr_sig {
 }
 
 /// The signed content of an attestation (everything except the signatures).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AttestationBody {
     pub v: u8,
     /// Settlement tx output whose payload commits this attestation's id.
@@ -311,7 +311,7 @@ impl CovenantWitness {
 }
 
 /// What authorizes an attestation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Authorization {
     /// Both parties signed. The ordinary case.
@@ -327,7 +327,7 @@ pub enum Authorization {
 }
 
 /// A fully authorized attestation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Attestation {
     #[serde(flatten)]
     pub body: AttestationBody,

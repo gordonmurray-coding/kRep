@@ -9,8 +9,13 @@
 //! rendering of a verdict you reached yourself, not a claim someone made to
 //! you.
 //!
-//! The server is deliberately tiny and read-only: two routes, no filesystem
-//! access, no state. It is a viewer, not a service.
+//! The server is deliberately tiny and read-only: a handful of routes, no
+//! filesystem access, no state. It is a viewer, not a service.
+//!
+//! The marketplace follows the same rule. Listings come from relays you choose,
+//! every record is checked against an accumulator you built, and nothing is
+//! ranked by anything that did not come out of the chain. There is no promotion
+//! to sell because there is nobody here to sell it.
 
 use anyhow::{Context, Result};
 use krep_core::chain::Chain;
@@ -24,6 +29,46 @@ pub struct Explorer {
     pub handle: tokio::runtime::Handle,
     pub cfg: ScanConfig,
     pub rpc_url: String,
+    /// A saved scan, for checking marketplace listings without a node round
+    /// trip per seller. Absent means the market route says so rather than
+    /// showing scores it has not checked.
+    pub roots: Option<Arc<crate::market::RootsVerifier>>,
+    pub relays: Vec<String>,
+}
+
+impl Explorer {
+    /// Fetch listings and check each seller's record against the accumulator.
+    fn market(&self) -> serde_json::Value {
+        let Some(roots) = &self.roots else {
+            return serde_json::json!({
+                "ok": false,
+                "error": "no accumulator. Build one with `krep roots --out roots.json`, then \
+                          start the server with --roots roots.json. Without it every score on \
+                          this page would be a number nobody checked."
+            });
+        };
+        if self.relays.is_empty() {
+            return serde_json::json!({ "ok": false, "error": "no relays configured; pass --relay" });
+        }
+        let offers = match self
+            .handle
+            .block_on(crate::board::list_offers(&self.relays, None, None))
+        {
+            Ok(o) => o,
+            Err(e) => return serde_json::json!({ "ok": false, "error": e.to_string() }),
+        };
+        let mut listings: Vec<crate::market::Listing> = offers
+            .into_iter()
+            .map(|(id, offer, e)| crate::market::assess(id, e.pubkey, offer, roots))
+            .collect();
+        crate::market::rank(&mut listings);
+        serde_json::json!({
+            "ok": true,
+            "complete": roots.complete,
+            "relays": self.relays,
+            "listings": listings,
+        })
+    }
 }
 
 impl Explorer {
@@ -142,10 +187,16 @@ impl Explorer {
         const MAX_BODY: usize = 4 * 1024 * 1024;
         let (status, content_type, body) = match (method.as_str(), path.as_str()) {
             ("GET", "/") => ("200 OK", "text/html; charset=utf-8", PAGE.to_string()),
+            ("GET", "/market") => ("200 OK", "text/html; charset=utf-8", MARKET.to_string()),
+            ("GET", "/api/market") => ("200 OK", "application/json", self.market().to_string()),
             ("GET", "/api/info") => (
                 "200 OK",
                 "application/json",
-                serde_json::json!({ "rpc": self.rpc_url }).to_string(),
+                serde_json::json!({
+                    "rpc": self.rpc_url,
+                    "market": self.roots.is_some() && !self.relays.is_empty(),
+                })
+                .to_string(),
             ),
             ("POST", "/api/verify") if content_length <= MAX_BODY => {
                 let mut buf = vec![0u8; content_length];
@@ -172,3 +223,4 @@ impl Explorer {
 }
 
 const PAGE: &str = include_str!("explore.html");
+const MARKET: &str = include_str!("market.html");

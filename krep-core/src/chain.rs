@@ -5,7 +5,7 @@ use secp256k1::XOnlyPublicKey;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Chain {
     #[serde(with = "crate::xonly")]
     pub owner: XOnlyPublicKey,

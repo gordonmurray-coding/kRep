@@ -100,6 +100,50 @@ pub async fn list(urls: &[String], process: Option<&str>, region: Option<&str>) 
     Ok(out)
 }
 
+/// Publish a seller's listing.
+pub async fn post_offer(
+    urls: &[String],
+    key: &Keypair,
+    offer_id: &str,
+    offer: &krep_board::offer::Offer,
+    created_at: u64,
+) -> Result<(String, Vec<(String, String)>)> {
+    let event = offer.to_event(key, offer_id, created_at);
+    let addr = format!(
+        "{}:{}:{offer_id}",
+        krep_board::offer::KIND_OFFER,
+        hex::encode(key.x_only_public_key().0.serialize())
+    );
+    Ok((addr, publish_all(urls, &event, TIMEOUT).await))
+}
+
+/// Read listings. Offers whose embedded record belongs to somebody else are
+/// dropped here by `from_event`, so a caller never sees a borrowed reputation.
+pub async fn list_offers(
+    urls: &[String],
+    process: Option<&str>,
+    region: Option<&str>,
+) -> Result<Vec<(String, krep_board::offer::Offer, Event)>> {
+    let filter = Filter {
+        kinds: Some(vec![krep_board::offer::KIND_OFFER]),
+        limit: Some(200),
+        ..Default::default()
+    };
+    let events = newest_per_address(query_all(urls, &filter, TIMEOUT).await);
+    let mut out = Vec::new();
+    for e in events {
+        let Ok((id, offer)) = krep_board::offer::Offer::from_event(&e) else { continue };
+        if process.is_some_and(|p| offer.process != p) {
+            continue;
+        }
+        if region.is_some_and(|r| offer.region != r) {
+            continue;
+        }
+        out.push((id, offer, e));
+    }
+    Ok(out)
+}
+
 pub async fn claim(
     urls: &[String],
     key: &Keypair,

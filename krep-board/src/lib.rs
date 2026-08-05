@@ -25,6 +25,7 @@
 
 pub mod event;
 pub mod job;
+pub mod offer;
 pub mod nip17;
 pub mod nip44;
 pub mod relay;

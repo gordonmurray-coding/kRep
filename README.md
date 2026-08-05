@@ -521,6 +521,61 @@ the maker's inbox recovered both the message and the true sender from the inner
 seal, and the buyer's own inbox showed nothing, since a wrap is readable only by
 its addressee.
 
+## M7 — the marketplace
+
+M3 built the demand side: a buyer posts a job and makers compete. That only
+works if discovery starts with somebody who already knows what they want and has
+funded an escrow for it. An offer is the other direction — a seller says what
+they can make, and a buyer browses.
+
+```bash
+krep offer post --seed m.seed --context fabmesh --offer-id fdm-eu \
+  --title "FDM printing, PLA and PETG" --process fdm --material PLA \
+  --region EU --from-price 50000000 --lead-days 3 --chain m.chain.json \
+  --relay wss://nos.lol
+
+krep serve --roots roots.json --relay wss://nos.lol   # /market
+```
+
+**A listing carries the seller's whole chain, not a pointer to it.** A pointer
+would have to be resolved by somebody, and whoever resolves it is a party the
+reader is now trusting. Shipping the chain inside the signed event means the
+reader checks the same bytes the seller signed, against their own accumulator,
+with nobody in between. Chains are a few hundred bytes an entry, so this costs
+nothing.
+
+**An offer cannot advertise a stranger's record.** In kRep a pseudonym is also
+its Nostr identity, so the event's signature is made by the key the chain belongs
+to; `Offer::from_event` requires the embedded chain's owner to equal the event's
+author. Without it, anyone could paste a reputable trader's chain into their own
+listing and inherit their standing — the same *two true things bound to nobody*
+failure the disclosure circuit guards against, in the one place a buyer would be
+least likely to notice.
+
+**Browsing cannot use the node.** Verifying one chain against kaspad takes 50 to
+100 seconds, so a page of twenty sellers would take an hour — and a marketplace
+that reacts to that by not verifying is the platform-rating problem it exists to
+replace. The M6 accumulator already solves it: a saved scan holds every anchored
+id, so the check is a tree lookup rather than a chain scan. Instant, and still
+derived by the reader.
+
+**A miss is reported as unknown, never as unanchored.** An accumulator has a
+horizon at both ends. An attestation absent from it was either never anchored or
+settled outside the scanned range, and nothing local can tell those apart — so
+the page says it cannot confirm rather than calling a stranger a liar because a
+file is out of date. The cost is that an invented record also reads as unknown;
+that is the right way round, since no score is ever shown for one.
+
+### What a partial accumulator cannot do
+
+Worth stating because it is not obvious and it bit this build immediately.
+`verify_anchored` checks *every* entry, so an accumulator verifies only chains
+that lie entirely inside it. A trader whose history straddles the scan's start
+fails wholesale — not partially. A marketplace therefore wants a full-window
+scan, which takes about nine hours, and which is stale for anything that settled
+since. Keeping one current needs incremental following of the tip; that does not
+exist yet, and it is the honest gap in this milestone.
+
 ## M5 — reputation explorer
 
 ```bash

@@ -18,6 +18,7 @@ mod anchor;
 mod board;
 mod escrow;
 mod explore;
+mod market;
 mod prove;
 mod roots;
 mod rpc;
@@ -236,6 +237,11 @@ enum Cmd {
         #[arg(long)]
         fee_rate: Option<f64>,
     },
+    /// Seller listings — what people offer, and the record behind it.
+    Offer {
+        #[command(subcommand)]
+        cmd: OfferCmd,
+    },
     /// The FabMesh job board, over Nostr.
     Job {
         #[command(subcommand)]
@@ -319,6 +325,13 @@ enum Cmd {
     Serve {
         #[arg(long, default_value = "127.0.0.1:8080")]
         listen: String,
+        /// A saved scan from `krep roots --out`. Enables /market: listings are
+        /// checked against it instantly, where a node round trip per seller
+        /// would take an hour for a page of twenty.
+        #[arg(long)]
+        roots: Option<PathBuf>,
+        #[command(flatten)]
+        relay: RelayOpts,
         #[command(flatten)]
         rpc: RpcOpts,
     },
@@ -355,6 +368,55 @@ struct RelayOpts {
     /// asked it alone.
     #[arg(long = "relay")]
     relays: Vec<String>,
+}
+
+#[derive(Subcommand)]
+enum OfferCmd {
+    /// Publish what you offer, with your record attached.
+    Post {
+        /// Your pseudonym — also your Nostr identity, and the key the record
+        /// must belong to. An offer signed by one identity cannot advertise
+        /// another's chain.
+        #[arg(long, requires = "context")]
+        seed: PathBuf,
+        #[arg(long)]
+        context: Option<String>,
+        /// Stable identifier; publishing again with the same one replaces it.
+        #[arg(long)]
+        offer_id: String,
+        #[arg(long)]
+        title: String,
+        #[arg(long, default_value = "")]
+        summary: String,
+        #[arg(long)]
+        process: String,
+        /// Repeatable.
+        #[arg(long = "material")]
+        materials: Vec<String>,
+        /// Coarse only — continent or country. Never a street address.
+        #[arg(long)]
+        region: String,
+        /// Indicative floor in sompi. Only an escrow binds anyone to a price.
+        #[arg(long, default_value_t = 0)]
+        from_price: u64,
+        #[arg(long, default_value_t = 7)]
+        lead_days: u32,
+        /// Your chain, published alongside the listing so a buyer can check it
+        /// without asking anyone.
+        #[arg(long)]
+        chain: Option<PathBuf>,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
+    /// List what is on offer.
+    List {
+        #[arg(long)]
+        process: Option<String>,
+        #[arg(long)]
+        region: Option<String>,
+        #[command(flatten)]
+        relay: RelayOpts,
+    },
 }
 
 #[derive(Subcommand)]
@@ -919,6 +981,82 @@ fn report(what: &str, id: &str, results: Vec<(String, String)>) {
         eprintln!("WARNING: no relay accepted it — nobody can see this yet");
     }
     println!("{id}");
+}
+
+fn run_offer(cmd: OfferCmd) -> Result<()> {
+    let rt = board_rt()?;
+    match cmd {
+        OfferCmd::Post {
+            seed, context, offer_id, title, summary, process, materials, region,
+            from_price, lead_days, chain, relay,
+        } => {
+            let urls = board::relays(&relay.relays)?;
+            let ctx = context.ok_or_else(|| anyhow!("--context is required"))?;
+            let key = load_keypair(&seed, &ctx)?;
+            let rep_chain = match &chain {
+                Some(p) => {
+                    let c = load_chain(p)?;
+                    // Refusing here rather than at the relay: an offer nobody
+                    // can parse is worse than one never published, and the
+                    // reason is easier to see now than in a reader's logs.
+                    if c.owner != key.x_only_public_key().0 {
+                        bail!(
+                            "that chain belongs to {}, but this offer is signed by {} —                              a listing cannot advertise somebody else's record",
+                            hex::encode(c.owner.serialize()),
+                            hex::encode(key.x_only_public_key().0.serialize())
+                        );
+                    }
+                    c.verify().context("this chain does not verify offline")?;
+                    Some(c)
+                }
+                None => None,
+            };
+            let offer = krep_board::offer::Offer {
+                v: 1,
+                title,
+                summary,
+                process,
+                materials,
+                region,
+                from_price,
+                lead_days,
+                rep_chain,
+            };
+            let (addr, results) =
+                rt.block_on(board::post_offer(&urls, &key, &offer_id, &offer, now()))?;
+            eprintln!("offer address {addr}");
+            report("published", &addr, results);
+        }
+        OfferCmd::List { process, region, relay } => {
+            let urls = board::relays(&relay.relays)?;
+            let offers =
+                rt.block_on(board::list_offers(&urls, process.as_deref(), region.as_deref()))?;
+            if offers.is_empty() {
+                eprintln!("nothing on offer on those relays");
+            }
+            for (id, o, e) in &offers {
+                let entries = o.rep_chain.as_ref().map(|c| c.attestations.len()).unwrap_or(0);
+                eprintln!(
+                    "{id}  {}
+  {} · {} · from {} sompi · {} days · {} record entr{}
+  by {}",
+                    o.title,
+                    o.process,
+                    o.region,
+                    o.from_price,
+                    o.lead_days,
+                    entries,
+                    if entries == 1 { "y" } else { "ies" },
+                    e.pubkey
+                );
+            }
+            println!("{}", serde_json::to_string_pretty(
+                &offers.iter().map(|(id, o, e)| serde_json::json!({
+                    "id": id, "seller": e.pubkey, "offer": o
+                })).collect::<Vec<_>>())?);
+        }
+    }
+    Ok(())
 }
 
 fn run_job(cmd: JobCmd) -> Result<()> {
@@ -1504,7 +1642,7 @@ fn main() -> Result<()> {
                 println!("{}:{}\t{} sompi", outpoint.transaction_id, outpoint.index, entry.amount);
             }
         }
-        Cmd::Serve { listen, rpc: opts } => {
+        Cmd::Serve { listen, roots: roots_path, relay, rpc: opts } => {
             if opts.offline {
                 bail!("the explorer verifies anchoring; --offline would make it a viewer of unproven claims");
             }
@@ -1527,6 +1665,20 @@ fn main() -> Result<()> {
                     max_spend_scan_blocks: opts.max_spend_scan_blocks,
                 },
                 rpc_url: url,
+                roots: match &roots_path {
+                    Some(p) => {
+                        let v = market::RootsVerifier::load(p)?;
+                        if !v.complete {
+                            eprintln!(
+                                "!! that scan never reached the tip. Recent settlements will look\n\
+                                 !! unanchored, which on a marketplace reads as fraud."
+                            );
+                        }
+                        Some(std::sync::Arc::new(v))
+                    }
+                    None => None,
+                },
+                relays: board::relays(&relay.relays).unwrap_or_default(),
             }
             .serve(&listen)?;
         }
@@ -1744,6 +1896,7 @@ fn main() -> Result<()> {
             };
             println!("{}", hex::encode(digest));
         }
+        Cmd::Offer { cmd } => run_offer(cmd)?,
         Cmd::Job { cmd } => run_job(cmd)?,
         Cmd::Escrow { cmd } => run_escrow(cmd)?,
         Cmd::Submit { tx, rpc: rpc_url } => {
