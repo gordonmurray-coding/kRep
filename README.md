@@ -864,6 +864,46 @@ to anyone reading the chain. It is not invisible to the accumulator, which
 learned about the slash from the chain rather than from its owner. A defaulter
 cannot become clean by handing you a shorter file.
 
+## A reference run
+
+M2 and M4 predate `krep hash` and committed to digests no counterparty could
+reproduce. This run follows the documented convention at every step, so there is
+a worked example to copy that is correct rather than merely finished. Nothing
+was shipped and the tracking string says so.
+
+| step | |
+|---|---|
+| design file | `bracket.scad`, blake3 `36c50b1bacfbb062fe7bbc74a09e8d1c6c91c52ed867f75806e83fc44ec07ebf` |
+| buyer pseudonym | `c86e3c60…` |
+| maker pseudonym | `b93db982…` |
+| buyer funds escrow | `1b0b8f1d4f84ebccdb3a1f952134420db9bd0f61bc2e1dec979d3fccafc9f4aa` |
+| buyer posts job | `30402:c86e3c60…:fabmesh-reference-1785943622`, accepted by `nos.lol` |
+| maker verifies posting against the escrow | reward, bond, deadline, file hash all agree |
+| **maker hashes the received file themselves** | matches the escrow's commitment |
+| maker claims, binding their pseudonym | `681c26b3372e94bcf6760f4352423ad4727edcfe9568696d42f422961dbcde24` |
+| tracking string, blake3 | `bd7071993f034bb2b480fb5e1998ba87b0159e09432ccbb6869036a9d9dc4f1a` |
+| maker records delivery | `725fe865be58a4e80c36b38da5d39c5c4fd31e34a905e3dd0a7d0a7f0c1c04be` |
+| buyer settles, minting both reputations | `32e73df9438af1581dfb9c421598f489e47adcc6e87ec5709b0694e6edb7add9` |
+| both chains verify | maker `0863362e…`, buyer `01fe8cbe…` |
+
+The bolded row is the one M2 and M4 never did, and it is where the blake2b bug
+would have surfaced. `job verify` compares the posting against the escrow, but
+both derive from the same value, so it cannot catch a wrong hash *function* — it
+only catches a posting advertising terms the escrow will not honour. What catches
+a convention mismatch is the maker hashing the file they actually received and
+comparing:
+
+```
+escrow commits to:     36c50b1bacfbb062fe7bbc74a09e8d1c6c91c52ed867f75806e83fc44ec07ebf
+maker hashes the file: 36c50b1bacfbb062fe7bbc74a09e8d1c6c91c52ed867f75806e83fc44ec07ebf
+blake2b, as M2/M4 used: 6ba58334abc1f77154d19e09d5b875844a994527a02cc0a0bb45dbcfd0a94ad5
+```
+
+A maker following the documentation would have refused the earlier jobs. That
+step is only meaningful when someone else performs it, which is the whole
+argument of [docs/TWO-PARTY.md](docs/TWO-PARTY.md) — here it is still one person,
+so it demonstrates the check rather than exercising it.
+
 ### Rebuilding the roots from chain data
 
 ```bash

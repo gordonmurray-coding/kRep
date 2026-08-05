@@ -143,3 +143,10 @@ newline and will not match.
 
 One person cannot find a bug of this shape. That is the argument for this
 document.
+
+The README's *reference run* is this runbook driven end to end on testnet-10,
+with every hash computed by `krep hash`. Copy its values to check your own setup
+produces the same shape of output — but note that it is still one person on both
+sides, so it demonstrates the file-hash check rather than exercising it. Yours
+would be the first time that comparison is made by someone who did not write the
+number being compared against.
