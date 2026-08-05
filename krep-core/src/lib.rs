@@ -46,6 +46,14 @@ pub enum KrepError {
     BadField(String),
     #[error("chain error at index {index}: {reason}")]
     Chain { index: u64, reason: String },
+    /// The node could not say either way — not the same as a negative.
+    ///
+    /// An anchor older than the pruning point, or newer than the confirmation
+    /// floor, is unresolvable rather than absent. Collapsing this into "not
+    /// anchored" would slander an honest chain for the sole offence of being
+    /// old, so it is a separate variant and callers have to handle it as one.
+    #[error("chain error at index {index}: could not determine whether this is anchored: {reason}")]
+    AnchorUnknown { index: u64, reason: String },
     #[error("hex/parse error: {0}")]
     Parse(String),
 }

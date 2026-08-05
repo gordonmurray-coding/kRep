@@ -83,7 +83,7 @@ impl Chain {
             let idx = i as u64;
             let ok = anchor
                 .is_anchored(&att.id(), &att.body.anchor)
-                .map_err(|e| KrepError::Chain { index: idx, reason: format!("anchor query failed: {e}") })?;
+                .map_err(|e| KrepError::AnchorUnknown { index: idx, reason: e.to_string() })?;
             if !ok {
                 return Err(KrepError::Chain { index: idx, reason: "attestation not anchored on-chain".into() });
             }
@@ -95,7 +95,7 @@ impl Chain {
             if let Some(witness) = att.covenant_witness() {
                 let authorized = anchor
                     .covenant_witnessed(&att.body.anchor, witness, &att.body.owner)
-                    .map_err(|e| KrepError::Chain { index: idx, reason: format!("covenant query failed: {e}") })?;
+                    .map_err(|e| KrepError::AnchorUnknown { index: idx, reason: e.to_string() })?;
                 if !authorized {
                     return Err(KrepError::Chain {
                         index: idx,

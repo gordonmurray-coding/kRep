@@ -43,10 +43,18 @@ impl Explorer {
         let verifier =
             KaspadAnchorVerifier::new(self.client.clone(), self.handle.clone(), self.cfg.clone());
         if let Err(e) = verifier.prefetch(chain.attestations.iter().map(|a| &a.body.anchor)) {
-            return serde_json::json!({ "ok": false, "stage": "anchor", "error": e.to_string() });
+            return serde_json::json!({ "ok": false, "stage": "unknown", "error": e.to_string() });
         }
+        // "We cannot tell" and "it never happened" are different answers, and
+        // only one of them is an accusation. An anchor that has fallen behind
+        // this node's pruning point is the ordinary fate of an old chain, not
+        // evidence against its owner.
         if let Err(e) = chain.verify_anchored(&verifier) {
-            return serde_json::json!({ "ok": false, "stage": "anchor", "error": e.to_string() });
+            let stage = match e {
+                krep_core::KrepError::AnchorUnknown { .. } => "unknown",
+                _ => "anchor",
+            };
+            return serde_json::json!({ "ok": false, "stage": stage, "error": e.to_string() });
         }
 
         let score = chain.score();

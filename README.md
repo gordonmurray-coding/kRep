@@ -534,14 +534,29 @@ verification uses the same code path as `krep verify`, against your node, and
 the page renders a verdict you reached yourself rather than a claim someone made
 to you.
 
-Four verdicts, kept distinct because they mean very different things:
+Five verdicts, kept distinct because they mean very different things:
 
 | verdict | meaning |
 |---|---|
 | **That isn't a record file** | not a valid attestation chain |
 | **This file has been tampered with** | signatures or the hash-linked order do not hold |
 | **Some of this never happened** | well-formed, but an entry is not anchored in a settled transaction |
+| **This node can't see back that far** | the node cannot resolve an anchor — no verdict either way |
 | **This record is real** | every entry committed in a settled Kaspa transaction |
+
+The fourth was added after the explorer's own sample chains aged past the node's
+pruning point and the page called them fraudulent. `verify_anchored` had always
+kept the distinction — an unresolvable anchor raises an error where a genuinely
+unanchored one returns false — but the explorer flattened both into "some of this
+never happened". Telling an honest trader their record was invented, when the
+only thing wrong is that it is old, is the worst mistake this page can make, so
+the distinction is now a separate error variant (`KrepError::AnchorUnknown`)
+rather than a string comparison someone can drop.
+
+Chains expire from a non-archival node's view. That is inherent: kaspad keeps a
+pruning window, so a record eventually becomes unreadable to it without becoming
+untrue. The page says so rather than guessing, and the bundled examples carry the
+same warning, since they will age out too.
 
 The wording is deliberately plain. The person who most needs this page is the
 one about to send money to a stranger, and they do not know what an attestation
