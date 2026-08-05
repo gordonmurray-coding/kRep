@@ -793,13 +793,48 @@ build takes nine minutes for the same work, so measure with `--release`. And the
 saved scan is 37 MB, after deduplicating: a settlement spending several outpoints
 repeats each id once per input, so a raw scan is about 40% duplicates.
 
-**One caveat about the defaults half.** This window contained no slashes at all,
-so the defaults tree is empty and its root is the empty root. Non-membership in
-an empty set is true for everyone, which means the "0 defaults" half of the proof
-is currently carrying no weight on testnet-10 — not because the mechanism is
-wrong, but because nobody has defaulted inside the window. The M2 slash is older
-than the pruning point. Worth knowing before reading too much into a verified
-proof today.
+### The defaults half, with something actually in it
+
+The first full scan contained no slashes, so the defaults tree was empty and
+non-membership in it was true for everyone — that half of the proof was carrying
+no weight. So a default was made on purpose: an escrow opened, claimed by the
+**same maker who holds the M4 success**, then left unshipped until the deadline
+passed and the buyer slashed it.
+
+| step | |
+|---|---|
+| escrow funded | `c402d705…` |
+| maker claims, binding `b36ede01…` | `3494bb78…` |
+| never ships; deadline passes; buyer slashes | `0784996c…` |
+| maker's chain, re-verified live | 2 trades · 1 default · 50% |
+
+The rescan found it without being told anything:
+
+```
+1,275,679 blocks, 13,131,429 accepted transactions, reached the tip
+379,326 anchored leaves | defaulted pseudonyms 1
+  -> b36ede013b3204d71dfd3dd69636a3079a1a2b0796844f2678b99dbf5a247128
+defaults root 0x2187e108…  (was 0x265a9224…, the empty root)
+```
+
+The pseudonym was recovered from the slash transaction's signature script by
+`default_from_spend`, which is the unilateral-default mechanism working on live
+data rather than in a test.
+
+Three results against that accumulator:
+
+| chain offered | result |
+|---|---|
+| the slashed maker's full chain | refused, no proof written |
+| **the same maker's chain with the default entry omitted** | **refused** |
+| the buyer, clean, same accumulator | proves, and verifies |
+
+The middle row is the one worth the whole sparse tree. That truncated chain is
+the original M4 file: one success, no default, and it still verifies against a
+live node — omitting a *trailing* entry breaks no `prev` link and is invisible
+to anyone reading the chain. It is not invisible to the accumulator, which
+learned about the slash from the chain rather than from its owner. A defaulter
+cannot become clean by handing you a shorter file.
 
 ### Rebuilding the roots from chain data
 
@@ -869,8 +904,8 @@ against fixed-depth trees simply failed to verify, with nothing to indicate why.
 
 1. A real physical dogfood run. The M4 loop has been driven end to end with a
    simulated shipment; only actual atoms remain.
-2. A default inside a scanned window, so the non-membership half of the proof is
-   exercised against a defaults tree that is not empty.
+2. Another party. Everything so far has been driven by one person holding both
+   sides of every trade, which is the one thing dogfooding cannot fake.
 
 ## Deliberate design points (don't "fix" these)
 
