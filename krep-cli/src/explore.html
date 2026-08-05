@@ -50,14 +50,16 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 .wrap { max-width: 68rem; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; display: flex; flex-direction: column; gap: 1.75rem; }
-header { display: flex; flex-direction: column; gap: .5rem; border-bottom: 1px solid var(--hair); padding-bottom: 1.25rem; }
-h1 { font-family: var(--serif); font-size: clamp(1.8rem, 4vw, 2.4rem); font-weight: 600; margin: 0; letter-spacing: -.01em; text-wrap: balance; }
+header { display: flex; flex-direction: column; gap: .65rem; padding-bottom: .25rem; }
+h1 {
+  font-family: var(--serif); font-size: clamp(1.85rem, 4.2vw, 2.7rem);
+  font-weight: 600; margin: 0; letter-spacing: -.015em; line-height: 1.12;
+  text-wrap: balance; max-width: 20ch;
+}
 .eyebrow { margin: 0; font-size: .72rem; text-transform: uppercase; letter-spacing: .14em; font-weight: 700; color: var(--seal); }
-.lede { color: var(--muted); max-width: 62ch; margin: 0; }
-.node { font-family: var(--mono); font-size: .8rem; color: var(--muted); }
-.node b { color: var(--seal); font-weight: 600; }
+.lede { color: var(--muted); max-width: 56ch; margin: 0; font-size: 1.02rem; }
 
-.card { background: var(--card); border: 1px solid var(--hair); border-radius: 6px; padding: 1.25rem; display: flex; flex-direction: column; gap: .9rem; }
+.card { background: var(--card); border: 1px solid var(--hair); border-radius: 6px; padding: 1.35rem; display: flex; flex-direction: column; gap: .9rem; }
 label { font-size: .74rem; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); font-weight: 600; }
 textarea {
   width: 100%; min-height: 9rem; resize: vertical; padding: .8rem;
@@ -70,7 +72,7 @@ textarea:focus-visible, button:focus-visible { outline: 2px solid var(--seal); o
 button {
   font: inherit; font-weight: 600; cursor: pointer;
   background: var(--seal); color: var(--card); border: 1px solid var(--seal);
-  padding: .55rem 1.1rem; border-radius: 4px;
+  padding: .6rem 1.35rem; border-radius: 4px;
 }
 button.ghost { background: transparent; color: var(--muted); border-color: var(--hair); }
 button:disabled { opacity: .55; cursor: progress; }
@@ -79,6 +81,36 @@ button:disabled { opacity: .55; cursor: progress; }
 .examples .k { font-size: .74rem; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); font-weight: 600; }
 button.sample { font-weight: 500; }
 .stat .why { font-size: .72rem; color: var(--muted); line-height: 1.35; }
+
+/* Section headings: quiet labels, so the content carries the weight. */
+.section-title {
+  margin: 0; font-size: .72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .12em; color: var(--muted);
+}
+.compare-wrap { display: flex; flex-direction: column; gap: .8rem; }
+
+/* The three-row argument. Hairline rows rather than cards: this is a
+   specification being read, not a set of features being sold. The first two
+   rows are context and stay muted; the third is the answer and gets full ink,
+   so the hierarchy does the explaining before anyone reads a word. */
+.compare { margin: 0; border-top: 1px solid var(--hair); }
+.compare > div {
+  display: grid; grid-template-columns: 11rem 1fr; gap: 0 1.5rem;
+  padding: .95rem 0; border-bottom: 1px solid var(--hair);
+}
+.compare dt {
+  font-size: .78rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .07em; color: var(--muted); padding-top: .15rem;
+}
+.compare dd { margin: 0; color: var(--muted); font-size: .92rem; max-width: 62ch; }
+.compare .mine dt { color: var(--seal); }
+.compare .mine dd { color: var(--ink); font-size: .97rem; }
+@media (max-width: 34rem) {
+  .compare > div { grid-template-columns: 1fr; gap: .3rem; }
+}
+
+.fineprint { font-size: .78rem; line-height: 1.45; border-top: 1px dashed var(--hair); padding-top: .8rem; margin: 0; }
+.fineprint b { color: var(--seal); font-weight: 600; font-family: var(--mono); }
 
 /* Plain-English explainer, folded away so it doesn't crowd the tool itself. */
 .explain { border: 1px solid var(--hair); border-radius: 6px; background: var(--card); }
@@ -96,8 +128,8 @@ button.sample { font-weight: 500; }
 
 /* Verdict band — state carried by form and colour, not text alone. */
 .verdict { border-radius: 6px; border: 1px solid; padding: 1rem 1.25rem; display: flex; gap: 1rem; align-items: flex-start; }
-.verdict .mark { font-family: var(--mono); font-weight: 700; font-size: 1.1rem; line-height: 1.3; }
-.verdict h2 { margin: 0 0 .15rem; font-family: var(--serif); font-size: 1.15rem; font-weight: 600; }
+.verdict .mark { font-family: var(--mono); font-weight: 700; font-size: 1.35rem; line-height: 1.25; }
+.verdict h2 { margin: 0 0 .25rem; font-family: var(--serif); font-size: 1.3rem; font-weight: 600; letter-spacing: -.01em; }
 .verdict p { margin: 0; font-size: .9rem; }
 .v-good { background: var(--good-soft); border-color: var(--good); color: var(--good); }
 .v-bad  { background: var(--bad-soft);  border-color: var(--bad);  color: var(--bad); }
@@ -142,34 +174,52 @@ section { display: flex; flex-direction: column; gap: .75rem; }
 <div class="wrap">
   <header>
     <p class="eyebrow">kRep</p>
-    <h1>Check someone&rsquo;s trading record</h1>
-    <p class="lede">Somebody wants you to deal with them, and says they have a history. They send you a file. This page tells you whether that history actually happened &mdash; or whether they typed it out this morning.</p>
-    <p class="node">Checked against your own Kaspa node: <b id="node">&hellip;</b>. Nothing here is taken on anyone&rsquo;s word.</p>
+    <h1>Anyone can claim a good track record. This checks it.</h1>
+    <p class="lede">You are about to send money to a stranger who says they are reliable. Paste the record they gave you and find out how much of it is actually provable.</p>
   </header>
 
+  <section class="compare-wrap">
+    <h2 class="section-title">Why this beats asking around</h2>
+    <dl class="compare">
+      <div>
+        <dt>Reviews</dt>
+        <dd>Free to write, so free to fake. Fifty glowing accounts cost nothing but an afternoon.</dd>
+      </div>
+      <div>
+        <dt>Platform ratings</dt>
+        <dd>Harder to fake &mdash; but the platform owns them. Leave and you start at zero, and you are trusting the platform&rsquo;s word about its own sellers.</dd>
+      </div>
+      <div class="mine">
+        <dt>A record like this</dt>
+        <dd>Every deal in it had to be paid for with a real transaction on Kaspa&rsquo;s public chain, and the failures are written by the escrow itself rather than by the person being judged. Faking a history means buying it, deal by deal, over the months it claims to span &mdash; and the record belongs to them, not to any platform.</dd>
+      </div>
+    </dl>
+  </section>
+
   <div class="card">
-    <label for="chain">Paste the file they sent you</label>
+    <label for="chain">The record they sent you</label>
     <textarea id="chain" spellcheck="false" placeholder='{"owner":"…","attestations":[…]}'></textarea>
     <div class="row">
       <button id="go">Check it</button>
       <button id="clear" class="ghost">Clear</button>
-      <span class="hint" id="hint">Safe to paste. A record file holds no passwords, no keys and no way to move anyone&rsquo;s money &mdash; only a list of past deals and the proof each one happened.</span>
+      <span class="hint" id="hint">Safe to paste: a record holds no passwords, no keys, and no way to move anyone&rsquo;s money.</span>
     </div>
     <div class="row examples">
-      <span class="k">Nothing to hand?</span>
+      <span class="k">No record to hand?</span>
       <button class="ghost sample" data-sample="verified">Someone who delivered</button>
       <button class="ghost sample" data-sample="defaulted">Someone who didn&rsquo;t</button>
-      <span class="hint">Two real records from Kaspa&rsquo;s test network, checked against a live node when they were added. A node keeps only recent history, so these will eventually read as <em>can&rsquo;t see back that far</em> &mdash; which is the honest answer, not a failure.</span>
     </div>
+    <p class="hint fineprint">Checked against your own Kaspa node &mdash; <b id="node">&hellip;</b> &mdash; so no one&rsquo;s word is taken for any of it, this page&rsquo;s included. The two examples are real records from the test network; a node keeps only recent history, so in time they will read as <em>can&rsquo;t see back that far</em>, which is the honest answer rather than a failure.</p>
   </div>
 
   <details class="explain">
-    <summary>How can a file like this be trusted?</summary>
+    <summary>What this can and can&rsquo;t tell you</summary>
     <div class="explain-body">
-      <p><b>The record isn&rsquo;t stored here, or anywhere they control.</b> Every deal on the list was written into a Kaspa transaction &mdash; a public payment that really settled, at a moment in time nobody can move. This page goes to a Kaspa node and looks each one up. If a deal isn&rsquo;t there, it doesn&rsquo;t count, no matter how convincing the file looks.</p>
-      <p><b>Lying is possible, but it isn&rsquo;t free.</b> Anyone can invent a glowing history in a text editor. What they can&rsquo;t do is invent the transactions behind it: each entry cost real fees to publish, and the deals themselves ran through an escrow that held real money. A fake history has to be paid for, deal by deal, over the months it claims to span.</p>
-      <p><b>They can&rsquo;t quietly drop the bad ones.</b> The entries are chained together, each one sealed over the one before, so removing an embarrassing deal breaks the file and this page says so. And when someone takes a job and vanishes, the escrow itself writes the failure to the chain &mdash; no signature from them required.</p>
-      <p><b>What it still can&rsquo;t tell you.</b> Not who they are: these are nicknames, not names. Not everything they&rsquo;ve done: they can show you a short record instead of a long one, and you&rsquo;d never know. And not whether the deals were real &mdash; two friends can trade with each other all day to build a record. Watch how many <em>different</em> people appear below.</p>
+      <p><b>The record isn&rsquo;t stored here, or anywhere they control.</b> Every deal on the list was written into a Kaspa transaction &mdash; a public payment that really settled, at a moment nobody can move. This page looks each one up on a node. If a deal isn&rsquo;t there it doesn&rsquo;t count, however convincing the file looks.</p>
+      <p><b>They can&rsquo;t quietly drop the bad ones.</b> Entries are chained, each sealed over the one before, so removing an embarrassing deal from the middle breaks the file and this page says so. And when someone takes a job and vanishes, the escrow writes that failure itself &mdash; no signature from them required, because a defaulter would never sign one.</p>
+      <p><b>It cannot tell you who they are.</b> These are nicknames. That is deliberate: a record you can carry between marketplaces without carrying your name with it.</p>
+      <p><b>It cannot tell you everything they have done.</b> A record can stop early. Removing an entry from the middle breaks the chain, but ending it before the embarrassing part does not &mdash; so read a clean record as the least they have done, not all of it.</p>
+      <p><b>It cannot tell you the deals were at arm&rsquo;s length.</b> Two friends trading back and forth build a real, paid-for record that recommends nobody. Watch how many <em>different</em> people appear below; the page flags it when they are few.</p>
     </div>
   </details>
 
@@ -227,6 +277,14 @@ function reading(s) {
   return out;
 }
 
+// Bring the verdict into view. The explanatory section above pushed results
+// below the fold, so without this a check appears to do nothing — the answer
+// arrives on a part of the page the reader cannot see.
+function reveal(out) {
+  const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  out.scrollIntoView({ behavior: still ? 'auto' : 'smooth', block: 'start' });
+}
+
 function render(r) {
   const out = $('#out');
   out.classList.remove('hidden');
@@ -236,6 +294,7 @@ function render(r) {
       <h2>${esc(title)}</h2><p>${esc(blurb)}</p>
       <p style="margin-top:.6rem;font-size:.82rem;opacity:.85">Exactly what failed: <code style="font-family:var(--mono);font-size:.78rem">${esc(r.error)}</code></p>
     </div></div>`;
+    reveal(out);
     return;
   }
 
@@ -312,6 +371,7 @@ function render(r) {
         <p>The second one seals the record at its current length. If they send you an updated file later, a different value means entries were added — and the same value means nothing has changed.</p>
       </div>
     </details>`;
+  reveal(out);
 }
 
 async function verify() {
