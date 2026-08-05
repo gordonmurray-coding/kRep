@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>kRep — reputation explorer</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns%3D%22http%3A%2F%2Fwww.w3.org%2F2000%2Fsvg%22%20viewBox%3D%220%200%2032%2032%22%20role%3D%22img%22%20aria-label%3D%22kRep%22%3E%20%3Ctitle%3EkRep%3C%2Ftitle%3E%20%3Cg%20fill%3D%22none%22%20stroke%3D%22%2317998f%22%20stroke-linejoin%3D%22round%22%3E%20%3Cpath%20d%3D%22M16%202.6%2027.6%209.3%2027.6%2022.7%2016%2029.4%204.4%2022.7%204.4%209.3Z%22%20stroke-width%3D%222.1%22%20opacity%3D%22.45%22%2F%3E%20%3Cg%20stroke-linecap%3D%22round%22%20stroke-width%3D%223.1%22%3E%20%3Cpath%20d%3D%22M10.2%2019.2%2013.6%2014.7%22%2F%3E%20%3Cpath%20d%3D%22M13.9%2022.2%2019.7%2014.5%22%2F%3E%20%3Cpath%20d%3D%22M17.6%2025.1%2024.6%2015.8%22%2F%3E%20%3C%2Fg%3E%20%3C%2Fg%3E%20%3C%2Fsvg%3E">
 <style>
 :root {
   --paper: #f6f8f8;
@@ -56,7 +57,15 @@ h1 {
   font-weight: 600; margin: 0; letter-spacing: -.015em; line-height: 1.12;
   text-wrap: balance; max-width: 20ch;
 }
-.eyebrow { margin: 0; font-size: .72rem; text-transform: uppercase; letter-spacing: .14em; font-weight: 700; color: var(--seal); }
+/* Brand lockup. The mark carries the colour and the wordmark stays quiet, so
+   the pair reads as one object rather than two competing ones. */
+.brand { display: flex; align-items: center; gap: .55rem; color: var(--seal); }
+.logo { width: 2.15rem; height: 2.15rem; flex: none; }
+.wordmark {
+  font-family: var(--serif); font-size: 1.32rem; font-weight: 600;
+  letter-spacing: -.005em; color: var(--ink);
+}
+.wordmark::first-letter { color: var(--seal); }
 .lede { color: var(--muted); max-width: 56ch; margin: 0; font-size: 1.02rem; }
 
 .card { background: var(--card); border: 1px solid var(--hair); border-radius: 6px; padding: 1.35rem; display: flex; flex-direction: column; gap: .9rem; }
@@ -173,7 +182,23 @@ section { display: flex; flex-direction: column; gap: .75rem; }
 <body>
 <div class="wrap">
   <header>
-    <p class="eyebrow">kRep</p>
+    <div class="brand">
+      <!-- Three ascending bars in a hexagonal seal. The bars borrow Kaspa's
+           parallel-bar geometry — its mark stands for the parallel blocks of a
+           BlockDAG — and put it to a different argument: a record accumulating
+           one paid-for entry at a time. currentColor, so it follows the theme. -->
+      <svg class="logo" viewBox="0 0 32 32" role="img" aria-label="kRep">
+        <g fill="none" stroke="currentColor" stroke-linejoin="round">
+          <path d="M16 2.6 27.6 9.3 27.6 22.7 16 29.4 4.4 22.7 4.4 9.3Z" stroke-width="2.1" opacity=".45"/>
+          <g stroke-linecap="round" stroke-width="3.1">
+            <path d="M10.2 19.2 13.6 14.7"/>
+            <path d="M13.9 22.2 19.7 14.5"/>
+            <path d="M17.6 25.1 24.6 15.8"/>
+          </g>
+        </g>
+      </svg>
+      <span class="wordmark">kRep</span>
+    </div>
     <h1>Anyone can claim a good track record. This checks it.</h1>
     <p class="lede">You are about to send money to a stranger who says they are reliable. Paste the record they gave you and find out how much of it is actually provable.</p>
   </header>

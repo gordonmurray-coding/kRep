@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="kRep">
+  <title>kRep</title>
+  <!--
+    Three ascending bars inside a hexagonal seal.
+
+    The bars are the homage: Kaspa's mark is built from parallel angled bars in
+    rotational symmetry, standing for the parallel blocks of a BlockDAG. Here
+    the same vocabulary is put to a different argument — three bars of growing
+    length, a record accumulating one paid-for entry at a time. Borrowed
+    geometry rather than a borrowed shape.
+
+    The hexagon is a seal, which is what this project's accent colour has been
+    called since the first commit. It is also the containing form that makes
+    three diagonal strokes read as a mark rather than as a scribble.
+
+    Everything is currentColor so the mark inherits the page's theme, and there
+    are four shapes in total so it survives being drawn 16 pixels wide.
+  -->
+  <g fill="none" stroke="currentColor" stroke-linejoin="round">
+    <path d="M16 2.6 27.6 9.3 27.6 22.7 16 29.4 4.4 22.7 4.4 9.3Z" stroke-width="2.1" opacity=".45"/>
+    <g stroke-linecap="round" stroke-width="3.1">
+      <path d="M10.2 19.2 13.6 14.7"/>
+      <path d="M13.9 22.2 19.7 14.5"/>
+      <path d="M17.6 25.1 24.6 15.8"/>
+    </g>
+  </g>
+</svg>

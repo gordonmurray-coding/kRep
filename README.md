@@ -1,3 +1,5 @@
+<img src="docs/logo.svg" alt="" width="72" align="left" hspace="14" vspace="4">
+
 # kRep — pseudonymous reputation anchored on Kaspa
 
 Reputation = an append-only, hash-linked chain of co-signed trade attestations,
@@ -878,6 +880,28 @@ live node — omitting a *trailing* entry breaks no `prev` link and is invisible
 to anyone reading the chain. It is not invisible to the accumulator, which
 learned about the slash from the chain rather than from its owner. A defaulter
 cannot become clean by handing you a shorter file.
+
+## The mark
+
+<img src="docs/logo.svg" alt="" width="112" align="right">
+
+Three ascending bars inside a hexagonal seal.
+
+The bars are the homage. Kaspa's mark is built from parallel angled bars in
+rotational symmetry, standing for the parallel blocks of a BlockDAG; the same
+vocabulary is put here to a different argument — three bars of growing length, a
+record accumulating one paid-for entry at a time. Borrowed geometry rather than a
+borrowed shape, and kRep keeps its own deeper teal instead of Kaspa's bright
+turquoise, so it reads as a relative rather than a copy.
+
+The hexagon is a seal, which is what this project's accent colour has been called
+since the first commit. It is also what makes three diagonal strokes read as a
+mark rather than as a scribble.
+
+Four shapes in total, because it has to survive being drawn sixteen pixels wide
+in a browser tab. The page inlines it with `currentColor` so it follows the
+light or dark theme; the favicon cannot, since a tab icon sits on browser chrome
+rather than on the page, so that one is pinned to a mid teal legible on both.
 
 ## A reference run
 
