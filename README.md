@@ -336,6 +336,21 @@ A covenant witness may never carry a `Success` — otherwise driving your own
 covenant would be a way to mint praise. It is only ever an answer to "the
 subject would refuse to sign this".
 
+**Both sides must hash the same way, and could not.** `Terms::file_hash` is
+documented as blake3 of the design file, and `escrow ship` takes a pre-hashed
+tracking value — but nothing here computed blake3 and `b3sum` was not installed,
+so the escrows in this repository were opened with blake2b. `--file-hash` takes
+32 bytes of hex and cannot tell how they were derived, so nothing complained.
+The slash escrow's file hash reads `6ba58334…`; blake3 of the same file is
+`36c50b1b…`.
+
+Self-dealt, this is invisible — the same wrong function on both sides agrees
+with itself. A counterparty following the documentation would have computed a
+different number and the file commitment would have referred to nothing. There
+is now a `krep hash --file` / `--text`, pinned by a test to blake3's published
+vector so the other party can check it with `b3sum` rather than trusting this
+binary. It is the first bug found by asking what a *second person* would do.
+
 **Timed branches wait longer than they look.** Slash and refund set the
 transaction's lock time to the deadline they unlock at, and consensus requires a
 lock time to be strictly in the past — equality does not count. So the natural
@@ -902,10 +917,17 @@ against fixed-depth trees simply failed to verify, with nothing to indicate why.
 
 ## Next
 
-1. A real physical dogfood run. The M4 loop has been driven end to end with a
-   simulated shipment; only actual atoms remain.
-2. Another party. Everything so far has been driven by one person holding both
-   sides of every trade, which is the one thing dogfooding cannot fake.
+1. **Another party.** Everything here was driven by one person holding both
+   sides of every trade. See [docs/TWO-PARTY.md](docs/TWO-PARTY.md) — it is the
+   only remaining item that would find anything.
+
+A physical shipment used to sit on this list and has been removed rather than
+completed. `escrow ship` takes an already-hashed tracking value, so the software
+never sees a tracking number — a real carrier reference and an invented one are
+byte-identical through every line of code here. Posting a parcel would have cost
+filament, postage and several days of latency to exercise nothing the simulated
+run did not. What that item was actually pointing at was the second party, and
+that needs no atoms at all.
 
 ## Deliberate design points (don't "fix" these)
 

@@ -322,6 +322,22 @@ enum Cmd {
         #[command(flatten)]
         rpc: RpcOpts,
     },
+    /// Hash a design file or a tracking number, the way an escrow expects.
+    ///
+    /// Escrow terms commit to blake3 of the design file, and a shipment commits
+    /// to blake3 of the carrier's tracking number. Both were documented and
+    /// neither was computable with this tool, so each party reached for whatever
+    /// was to hand. `--file-hash` takes 32 bytes of hex and cannot tell how they
+    /// were derived, which makes a mismatch silent: two parties agree on a job
+    /// whose file commitment means nothing.
+    Hash {
+        /// Hash a file's contents — the design the job is for.
+        #[arg(long, conflicts_with = "text")]
+        file: Option<PathBuf>,
+        /// Hash a string — the carrier's tracking number.
+        #[arg(long)]
+        text: Option<String>,
+    },
     /// Broadcast a signed transaction written by `krep anchor --out`.
     Submit {
         #[arg(long)]
@@ -1709,6 +1725,24 @@ fn main() -> Result<()> {
                 if bundle.min_successes == 1 { "" } else { "es" }
             );
             println!("Which chain, and which pseudonym, this proof does not say.");
+        }
+        Cmd::Hash { file, text } => {
+            let digest = match (&file, &text) {
+                (Some(p), None) => {
+                    let bytes = fs::read(p).with_context(|| format!("reading {}", p.display()))?;
+                    eprintln!("blake3 of {} ({} bytes)", p.display(), bytes.len());
+                    krep_core::commitment_hash(&bytes)
+                }
+                (None, Some(s)) => {
+                    // No trailing newline, no encoding choice to get wrong: the
+                    // bytes of the string as given. Both parties must hash the
+                    // same thing, and `echo | b3sum` would not.
+                    eprintln!("blake3 of the {} bytes of that text", s.len());
+                    krep_core::commitment_hash(s.as_bytes())
+                }
+                _ => bail!("pass exactly one of --file or --text"),
+            };
+            println!("{}", hex::encode(digest));
         }
         Cmd::Job { cmd } => run_job(cmd)?,
         Cmd::Escrow { cmd } => run_escrow(cmd)?,

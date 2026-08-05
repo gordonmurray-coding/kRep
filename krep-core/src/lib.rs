@@ -438,6 +438,24 @@ pub struct PartialAttestation {
 }
 
 /// Deterministic schnorr signature over the body digest.
+/// The hash an escrow's off-chain commitments use: a design file, a carrier's
+/// tracking number.
+///
+/// It lives here because both sides of a trade must compute it identically and
+/// there was previously no way to. `Terms::file_hash` is documented as blake3
+/// and `escrow ship` takes a pre-hashed tracking value, but neither could be
+/// produced by this software, so each party reached for whatever was to hand —
+/// and `--file-hash` accepts 32 bytes of hex without being able to tell how they
+/// were derived. Self-dealt, a mismatch is invisible; between two parties it
+/// means agreeing on a job whose file commitment refers to nothing.
+///
+/// No length prefix and no domain tag: this is a bare content hash that a
+/// counterparty must be able to reproduce with `b3sum` if they would rather not
+/// trust this binary.
+pub fn commitment_hash(bytes: &[u8]) -> [u8; 32] {
+    *blake3::hash(bytes).as_bytes()
+}
+
 pub fn sign_body(keypair: &Keypair, body: &AttestationBody) -> Signature {
     let secp = Secp256k1::new();
     let msg = Message::from_digest(body.signing_digest());

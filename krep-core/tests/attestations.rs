@@ -675,3 +675,18 @@ fn a_v2_id_fits_the_payload_commitment_scheme() {
     // property of the encoding, not an accident worth relying on elsewhere.
     assert!(id[0] < 0x40, "a BN254 element never sets the top two bits");
 }
+
+/// The commitment hash has to be reproducible by someone who does not run this
+/// binary, or a counterparty cannot check a job's design file for themselves.
+/// Pinned to blake3's own vector for the empty input.
+#[test]
+fn commitment_hash_is_plain_blake3() {
+    assert_eq!(
+        hex::encode(krep_core::commitment_hash(b"")),
+        "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+    );
+    // No trailing newline is added, which is the difference between this and
+    // `echo text | b3sum` — a mismatch that would look like a dishonest
+    // counterparty rather than a shell habit.
+    assert_ne!(krep_core::commitment_hash(b"abc"), krep_core::commitment_hash(b"abc\n"));
+}
