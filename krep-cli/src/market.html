@@ -229,7 +229,7 @@ section { display: flex; flex-direction: column; gap: .75rem; }
       <span class="wordmark">kRep</span>
     </div>
     <h1>What people are offering, and whether they deliver.</h1>
-    <p class="lede">Listings come from relays you chose. Every record beside them was checked on this machine against a chain you scanned yourself &mdash; nothing here is ranked by anything you cannot verify, and there is no position to buy.</p>
+    <p class="lede" id="whose">Listings come from relays you chose. Every record beside them was checked on this machine against a chain you scanned yourself &mdash; nothing here is ranked by anything you cannot verify, and there is no position to buy.</p>
     <nav class="tabs">
       <a href="/market" aria-current="page">Marketplace</a>
       <a href="/">Check a record</a>
@@ -293,6 +293,15 @@ function render(r) {
       <div class="rep">${rep(l)}</div>
     </article>`).join('');
 }
+
+fetch('/api/info').then(r => r.json()).then(r => {
+  if (!r.public) return;
+  document.getElementById('whose').innerHTML =
+    'Listings come from relays chosen by whoever operates this site, and every record was checked '
+    + 'on <em>their</em> machine, not yours. Nothing is ranked by anything they could sell &mdash; but '
+    + 'you are taking their word for the checking, which is what this project exists to avoid. '
+    + 'Run your own: <code style="font-family:var(--mono);font-size:.9em">krep serve --roots roots.json --relay wss://nos.lol</code>';
+}).catch(() => {});
 
 fetch('/api/market').then(r => r.json()).then(render)
   .catch(e => { $('#out').textContent = String(e); });

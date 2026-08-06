@@ -607,6 +607,31 @@ just cannot be resumed, and says so rather than quietly restarting from the wron
 place. Reorganisation of the block a scan stopped on is the remaining failure
 case, and it reports itself with the instruction to rebuild once.
 
+### Hosting it for other people
+
+`krep serve --public` exists because both pages otherwise tell the reader that
+the checking happened on their machine against their node. Put one behind a
+tunnel and that sentence is false for every visitor — and it is the exact claim
+this project exists to make true, so it has to change rather than quietly
+mislead:
+
+> Checked against a node run by whoever operates this site — not by you. That is
+> a real difference: you are trusting them, which is the one thing this tool
+> exists to avoid.
+
+Followed by the command to run it themselves. Verification is unchanged; a
+hosted verdict is a claim by whoever hosts it, and saying so is the only honest
+way to offer one. Binding to a non-loopback address without `--public` prints a
+warning, because the failure is silent otherwise.
+
+Two things to know before exposing one. Each `/api/verify` request can trigger a
+multi-minute node scan, so it is trivially exhausted by anyone who wants to;
+put a rate limit in front of it. And `/market` holds the whole accumulator in
+memory and takes a minute or two to start with a full-window scan.
+
+The two pitchbooks in `docs/` are static and need none of that. They are better
+served from anywhere that does not depend on a machine being awake.
+
 ## M5 — reputation explorer
 
 ```bash

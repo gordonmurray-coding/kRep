@@ -1,0 +1,210 @@
+<title>kRep — a covenant application on Kaspa</title>
+<style>
+:root {
+  --paper: #f6f8f8; --card: #ffffff; --ink: #10161a; --muted: #5b6b6e;
+  --hair: #dbe3e3; --seal: #0b6f68; --seal-soft: #e3efee;
+  --good: #1a6b41; --warn: #8a5300;
+  --well: #eef3f2;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0c1113; --card: #131a1d; --ink: #e7eeee; --muted: #8fa3a5;
+    --hair: #24302f; --seal: #4fb6aa; --seal-soft: #122a29; --well: #101819;
+    --good: #63c48d; --warn: #d9a447;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0c1113; --card: #131a1d; --ink: #e7eeee; --muted: #8fa3a5;
+  --hair: #24302f; --seal: #4fb6aa; --seal-soft: #122a29; --well: #101819;
+  --good: #63c48d; --warn: #d9a447;
+}
+:root[data-theme="light"] {
+  --paper: #f6f8f8; --card: #ffffff; --ink: #10161a; --muted: #5b6b6e;
+  --hair: #dbe3e3; --seal: #0b6f68; --seal-soft: #e3efee; --well: #eef3f2;
+  --good: #1a6b41; --warn: #8a5300;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: var(--sans); font-size: 15.5px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased; overflow-wrap: break-word;
+}
+.wrap { max-width: 54rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; display: flex; flex-direction: column; gap: 3.25rem; }
+
+.brand { display: flex; align-items: center; gap: .55rem; color: var(--seal); }
+.logo { width: 2.15rem; height: 2.15rem; flex: none; }
+.wordmark { font-family: var(--serif); font-size: 1.32rem; font-weight: 600; color: var(--ink); }
+.wordmark::first-letter { color: var(--seal); }
+
+header { display: flex; flex-direction: column; gap: 1rem; }
+h1 {
+  font-family: var(--serif); font-size: clamp(2rem, 5.5vw, 3.1rem); font-weight: 600;
+  margin: 0; letter-spacing: -.02em; line-height: 1.08; text-wrap: balance; max-width: 24ch;
+}
+.thesis { font-size: 1.12rem; color: var(--muted); max-width: 54ch; margin: 0; text-wrap: pretty; }
+
+section { display: flex; flex-direction: column; gap: .9rem; }
+.q { margin: 0; font-size: .72rem; font-weight: 700; text-transform: uppercase; letter-spacing: .16em; color: var(--seal); }
+h2 {
+  font-family: var(--serif); font-size: clamp(1.4rem, 3.2vw, 1.9rem); font-weight: 600;
+  margin: 0; letter-spacing: -.012em; line-height: 1.18; text-wrap: balance; max-width: 34ch;
+}
+p { margin: 0; max-width: 64ch; }
+p + p { margin-top: .1rem; }
+.dim { color: var(--muted); }
+strong { font-weight: 600; }
+
+.rows { margin: .4rem 0 0; border-top: 1px solid var(--hair); }
+.rows > div {
+  display: grid; grid-template-columns: 12rem 1fr; gap: 0 1.5rem;
+  padding: .95rem 0; border-bottom: 1px solid var(--hair);
+}
+.rows dt { font-size: .76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--seal); padding-top: .2rem; }
+.rows dd { margin: 0; color: var(--muted); font-size: .93rem; max-width: 58ch; }
+@media (max-width: 36rem) { .rows > div { grid-template-columns: 1fr; gap: .25rem; } }
+
+/* Field notes: a finding, then what it cost to learn. Each is one grid row of
+   two cells, so nothing falls into the wrong column. */
+.notes { margin: .3rem 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; }
+.notes li { padding: .9rem 0; border-bottom: 1px solid var(--hair); display: flex; flex-direction: column; gap: .25rem; }
+.notes b { font-weight: 600; }
+.notes span { color: var(--muted); font-size: .93rem; }
+
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); border-radius: 6px; overflow: hidden; }
+.fact { background: var(--card); padding: .95rem 1.05rem; display: flex; flex-direction: column; gap: .1rem; }
+.fact .n { font-family: var(--mono); font-size: 1.2rem; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.fact .l { font-size: .72rem; color: var(--muted); line-height: 1.35; }
+
+.well { background: var(--well); border: 1px solid var(--hair); border-radius: 6px; padding: 1.3rem 1.4rem; display: flex; flex-direction: column; gap: .8rem; }
+.well h3 { margin: 0; font-family: var(--serif); font-size: 1.12rem; font-weight: 600; }
+.ledger { margin: 0; display: flex; flex-direction: column; gap: .55rem; }
+.ledger div { display: grid; grid-template-columns: 1.4rem 1fr; gap: .7rem; align-items: baseline; font-size: .93rem; }
+.ledger .y { color: var(--good); font-weight: 700; font-family: var(--mono); }
+.ledger .n { color: var(--warn); font-weight: 700; font-family: var(--mono); }
+.ledger p { color: var(--muted); }
+.ledger b { color: var(--ink); font-weight: 600; }
+
+.ask { display: flex; flex-direction: column; gap: .1rem; margin: .3rem 0 0; padding: 0; list-style: none; }
+.ask li { padding: .8rem 0; border-bottom: 1px solid var(--hair); }
+.ask b { font-weight: 600; }
+.ask span { color: var(--muted); font-size: .93rem; display: block; }
+
+code { font-family: var(--mono); font-size: .84em; background: var(--seal-soft); color: var(--seal); padding: .08em .35em; border-radius: 3px; overflow-wrap: anywhere; }
+.rule { height: 1px; background: var(--hair); border: 0; margin: 0; }
+footer { color: var(--muted); font-size: .82rem; border-top: 1px solid var(--hair); padding-top: 1.2rem; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" role="img" aria-label="kRep">
+        <g fill="none" stroke="currentColor" stroke-linejoin="round">
+          <path d="M16 2.6 27.6 9.3 27.6 22.7 16 29.4 4.4 22.7 4.4 9.3Z" stroke-width="2.1" opacity=".45"/>
+          <g stroke-linecap="round" stroke-width="3.1">
+            <path d="M10.2 19.2 13.6 14.7"/>
+            <path d="M13.9 22.2 19.7 14.5"/>
+            <path d="M17.6 25.1 24.6 15.8"/>
+          </g>
+        </g>
+      </svg>
+      <span class="wordmark">kRep</span>
+    </div>
+    <h1>What Toccata is actually for.</h1>
+    <p class="thesis">kRep is portable pseudonymous reputation, minted as a side effect of settlement. It is also a nine-branch native covenant state machine driven end to end against consensus &mdash; and a report on what building one taught us about Kaspa.</p>
+  </header>
+
+  <hr class="rule">
+
+  <section>
+    <p class="q">Why Kaspa</p>
+    <h2>This is not a chain-agnostic project.</h2>
+    <p class="dim">The load-bearing mechanism is the <strong>unilateral default</strong>: a record of failure that the failing party never signs. Reputation systems collapse without it, because a defaulter will not co-sign their own default and no amount of protocol design gets a signature out of someone who has already left.</p>
+    <p class="dim">A covenant solves it. It cannot produce a signature either, but it can <em>force bytes into the payload</em> of the transaction that takes the bond. So a covenant-witnessed attestation carries no signatures at all, and its authority is the on-chain fact that the slash branch executed. That requires native introspection over outputs, payloads and time &mdash; which on Kaspa arrived with <strong>Toccata (KIP-16/17/20/21)</strong>, live on mainnet since DAA 474,165,565.</p>
+    <dl class="rows">
+      <div>
+        <dt>Covenants</dt>
+        <dd><code>OpTxOutputAmount</code>, <code>OpTxOutputSpk</code>, <code>OpTxPayloadSubstr</code> and friends let the escrow enforce its own state machine. State is threaded by having the spender supply the previous transaction&rsquo;s bytes and re-deriving its id in script.</dd>
+      </div>
+      <div>
+        <dt>Payload space</dt>
+        <dd>A settlement can carry the attestation ids it mints. Reputation therefore costs no extra transaction &mdash; it is a side effect of getting paid.</dd>
+      </div>
+      <div>
+        <dt>10 blocks/sec</dt>
+        <dd>Deadlines and dispute windows measured in DAA score are fine-grained enough to be practical rather than ceremonial.</dd>
+      </div>
+      <div>
+        <dt>Fees</dt>
+        <dd>The mainnet settlement that minted two reputations cost <strong>169,900 sompi</strong>. Per-trade anchoring is affordable, which is the whole Sybil-resistance argument: forging a history means buying it, deal by deal.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section>
+    <p class="q">What is running</p>
+    <h2>A nine-branch covenant, exercised against consensus.</h2>
+    <p class="dim">Claim, ship, settle, auto-release, dispute, resolve-to-maker, resolve-to-buyer, slash and refund &mdash; every branch driven on testnet-10 against real consensus rather than a local VM. The attestation and anchoring loop has additionally run on mainnet, where the predicted transaction id matched the broadcast one exactly.</p>
+    <div class="facts">
+      <div class="fact"><span class="n">9</span><span class="l">covenant branches, all exercised on-chain</span></div>
+      <div class="fact"><span class="n">169,900</span><span class="l">sompi &mdash; mainnet settlement minting two reputations</span></div>
+      <div class="fact"><span class="n">275,776</span><span class="l">anchored ids rebuilt from a full pruning window</span></div>
+      <div class="fact"><span class="n">1.7s</span><span class="l">to bring that accumulator current afterwards</span></div>
+      <div class="fact"><span class="n">14,656</span><span class="l">bytes &mdash; ZK proof of &ldquo;N successes, no defaults&rdquo;</span></div>
+      <div class="fact"><span class="n">178</span><span class="l">tests, many against live chain data</span></div>
+    </div>
+  </section>
+
+  <section>
+    <p class="q">Field notes</p>
+    <h2>Things only the network could teach.</h2>
+    <p class="dim">Offered because the next person building a covenant on Kaspa will hit these, and each one cost a live run to find.</p>
+    <ul class="notes">
+      <li><b>Script-unit budget grows with the whole script, not the branch taken.</b>
+        <span>An input commits a budget in sigop units, one unit buying 100,000 script units. A covenant&rsquo;s dispatcher scans past every earlier arm to reach the one being spent, so the last arms of the arbitrated covenant measured ~205,000 units. Claim and ship succeeded on a budget that resolution was rejected for. Arm ordering is a cost decision, not a style one.</span></li>
+      <li><b>Lock time must be strictly in the past.</b>
+        <span>Equal to the current DAA score counts as not passed, so a transaction submitted the instant its deadline arrives is rejected as <code>not finalized</code> &mdash; which reads like a signing or covenant fault and is neither. Every timed branch needs to either back its lock time off or tell the user how long remains.</span></li>
+      <li><b>kaspad has no transaction index.</b>
+        <span>No <code>getTransaction(txid)</code>. An anchor therefore cannot name the settlement that commits it &mdash; that would be circular anyway, since the id is inside the payload that determines the txid. Anchors instead name the <em>outpoint the settlement spends</em>, and verification searches forward for whatever consumed it.</span></li>
+      <li><b>Every covenant branch is a different script, so a naive design is a different address.</b>
+        <span>Which breaks state continuity outright. The branches have to sit behind one dispatcher so the escrow keeps a single P2SH address across its whole lifecycle.</span></li>
+      <li><b>Bulk reads beat per-block reads by an order of magnitude.</b>
+        <span>Fetching blocks individually cost about four minutes per chain batch; <code>get_blocks</code> returning a whole mergeset brought the same window to twenty-three seconds. On a 10 BPS chain that is the difference between &ldquo;anyone can maintain this&rdquo; being true and being a slogan.</span></li>
+      <li><b>Scan payloads at aligned offsets.</b>
+        <span>Indexing every position a 32-byte id could occupy makes a payload of length L cost L&minus;31 entries instead of L/32. Measured on testnet-10 that was 48,057 index entries where 1,611 would do &mdash; and the excess was driven by other protocols&rsquo; payload traffic, not ours.</span></li>
+    </ul>
+  </section>
+
+  <section>
+    <p class="q">What it needs</p>
+    <h2>Three things, none of them code.</h2>
+    <ul class="ask">
+      <li><b>A second party.</b><span>Every trade so far has been one person holding both sides. Counterparty diversity has therefore never been a real signal, and a dispute has never had two people who actually disagreed. One other trader would find more than another month of building.</span></li>
+      <li><b>Review of the covenant.</b><span>Nine branches enforcing custody of real funds, written by one author. It is exercised against consensus, which is not the same as being audited by someone trying to break it.</span></li>
+      <li><b>An archival node.</b><span>Kaspa prunes, so a record becomes unreadable without becoming untrue. Long histories need someone retaining more than the pruning window; the software says &ldquo;cannot confirm&rdquo; rather than guessing, but that is a limit, not a solution.</span></li>
+    </ul>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="well">
+      <h3>What is proven, and what is not</h3>
+      <p class="dim">A reputation system asking to be believed should be specific about its own evidence.</p>
+      <div class="ledger">
+        <div><span class="y">&check;</span><p><b>Mainnet settlement carrying two attestation ids.</b> <code>330861aa&hellip;</code>, both chains verifying, one trade scored on each side, and the predicted txid matching the broadcast one exactly.</p></div>
+        <div><span class="y">&check;</span><p><b>The unilateral default works on-chain.</b> A maker was slashed on testnet-10 and the covenant wrote the failure with no signature from them. The same chain with that entry omitted &mdash; which still verifies structurally &mdash; was refused, so a defaulter cannot launder their record by sending a shorter file.</p></div>
+        <div><span class="y">&check;</span><p><b>The zero-knowledge proof is real.</b> Barretenberg UltraHonk, against roots rebuilt from a full pruning window. A proof built on a different accumulator fails, and so does a proof of a circuit that asserts nothing.</p></div>
+        <div><span class="n">&mdash;</span><p><b>Escrow has run only on testnet-10.</b> Mainnet has carried the attestation and anchoring loop, not the covenant. Moving custody to mainnet is a decision that should follow review, not precede it.</p></div>
+        <div><span class="n">&mdash;</span><p><b>Every trade was self-dealt.</b> The mechanism works; the market does not exist yet. The marketplace currently has three listings and they all belong to the author.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    kRep &mdash; pseudonymous reputation anchored on Kaspa. No identity, no issuer, no server of record.
+    Figures are measurements from live runs, not projections.
+  </footer>
+</div>

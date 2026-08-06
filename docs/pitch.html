@@ -1,0 +1,234 @@
+<title>kRep — reputation you own</title>
+<style>
+:root {
+  --paper: #f6f8f8; --card: #ffffff; --ink: #10161a; --muted: #5b6b6e;
+  --hair: #dbe3e3; --seal: #0b6f68; --seal-soft: #e3efee;
+  --good: #1a6b41; --bad: #99201f; --warn: #8a5300;
+  --well: #eef3f2;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #0c1113; --card: #131a1d; --ink: #e7eeee; --muted: #8fa3a5;
+    --hair: #24302f; --seal: #4fb6aa; --seal-soft: #122a29; --well: #101819;
+    --good: #63c48d; --bad: #e8736f; --warn: #d9a447;
+  }
+}
+:root[data-theme="dark"] {
+  --paper: #0c1113; --card: #131a1d; --ink: #e7eeee; --muted: #8fa3a5;
+  --hair: #24302f; --seal: #4fb6aa; --seal-soft: #122a29; --well: #101819;
+  --good: #63c48d; --bad: #e8736f; --warn: #d9a447;
+}
+:root[data-theme="light"] {
+  --paper: #f6f8f8; --card: #ffffff; --ink: #10161a; --muted: #5b6b6e;
+  --hair: #dbe3e3; --seal: #0b6f68; --seal-soft: #e3efee; --well: #eef3f2;
+  --good: #1a6b41; --bad: #99201f; --warn: #8a5300;
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0; background: var(--paper); color: var(--ink);
+  font-family: var(--sans); font-size: 15.5px; line-height: 1.6;
+  -webkit-font-smoothing: antialiased; overflow-wrap: break-word;
+}
+.wrap { max-width: 54rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; display: flex; flex-direction: column; gap: 3.25rem; }
+
+/* Brand lockup, as on the product. */
+.brand { display: flex; align-items: center; gap: .55rem; color: var(--seal); }
+.logo { width: 2.15rem; height: 2.15rem; flex: none; }
+.wordmark { font-family: var(--serif); font-size: 1.32rem; font-weight: 600; color: var(--ink); }
+.wordmark::first-letter { color: var(--seal); }
+
+header { display: flex; flex-direction: column; gap: 1rem; }
+h1 {
+  font-family: var(--serif); font-size: clamp(2rem, 5.5vw, 3.1rem); font-weight: 600;
+  margin: 0; letter-spacing: -.02em; line-height: 1.08; text-wrap: balance; max-width: 24ch;
+}
+.thesis { font-size: 1.12rem; color: var(--muted); max-width: 52ch; margin: 0; text-wrap: pretty; }
+
+/* Sections are labelled by the question they answer. The label is small and
+   quiet; the answer carries the page. */
+section { display: flex; flex-direction: column; gap: .9rem; }
+.q {
+  margin: 0; font-size: .72rem; font-weight: 700; text-transform: uppercase;
+  letter-spacing: .16em; color: var(--seal);
+}
+h2 {
+  font-family: var(--serif); font-size: clamp(1.4rem, 3.2vw, 1.9rem); font-weight: 600;
+  margin: 0; letter-spacing: -.012em; line-height: 1.18; text-wrap: balance; max-width: 34ch;
+}
+p { margin: 0; max-width: 64ch; }
+p + p { margin-top: .1rem; }
+.dim { color: var(--muted); }
+strong { font-weight: 600; }
+
+/* The three-row argument, as on the site. Hairlines, not cards. */
+.rows { margin: .4rem 0 0; border-top: 1px solid var(--hair); }
+.rows > div {
+  display: grid; grid-template-columns: 11rem 1fr; gap: 0 1.5rem;
+  padding: .95rem 0; border-bottom: 1px solid var(--hair);
+}
+.rows dt { font-size: .76rem; font-weight: 700; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); padding-top: .2rem; }
+.rows dd { margin: 0; color: var(--muted); font-size: .93rem; max-width: 58ch; }
+.rows .mine dt { color: var(--seal); }
+.rows .mine dd { color: var(--ink); }
+@media (max-width: 34rem) { .rows > div { grid-template-columns: 1fr; gap: .25rem; } }
+
+/* A trade's lifecycle is genuinely ordered, so it is numbered. */
+.steps { margin: .3rem 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: .1rem; counter-reset: s; }
+.steps li {
+  display: grid; grid-template-columns: 1.9rem 1fr; gap: 0 .9rem; padding: .7rem 0;
+  border-bottom: 1px solid var(--hair); align-items: baseline;
+}
+.steps li::before {
+  counter-increment: s; content: counter(s);
+  font-family: var(--mono); font-size: .8rem; color: var(--seal); font-weight: 700;
+}
+.steps b { font-weight: 600; }
+/* Keep the description in the second column with the label it belongs to.
+   Without this it becomes a third grid item and falls under the number, into a
+   1.9rem-wide column that wraps one character per line. */
+.steps li > b { grid-column: 2; }
+.steps li > span { grid-column: 2; color: var(--muted); font-size: .93rem; }
+
+/* Measured facts. Monospace and tabular, because they are measurements. */
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: 1px; background: var(--hair); border: 1px solid var(--hair); border-radius: 6px; overflow: hidden; }
+.fact { background: var(--card); padding: .95rem 1.05rem; display: flex; flex-direction: column; gap: .1rem; }
+.fact .n { font-family: var(--mono); font-size: 1.2rem; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.fact .l { font-size: .72rem; color: var(--muted); line-height: 1.35; }
+
+.well { background: var(--well); border: 1px solid var(--hair); border-radius: 6px; padding: 1.3rem 1.4rem; display: flex; flex-direction: column; gap: .8rem; }
+.well h3 { margin: 0; font-family: var(--serif); font-size: 1.12rem; font-weight: 600; }
+.ledger { margin: 0; display: flex; flex-direction: column; gap: .55rem; }
+.ledger div { display: grid; grid-template-columns: 1.4rem 1fr; gap: .7rem; align-items: baseline; font-size: .93rem; }
+.ledger .y { color: var(--good); font-weight: 700; font-family: var(--mono); }
+.ledger .n { color: var(--warn); font-weight: 700; font-family: var(--mono); }
+.ledger p { color: var(--muted); }
+.ledger b { color: var(--ink); font-weight: 600; }
+
+code { font-family: var(--mono); font-size: .84em; background: var(--seal-soft); color: var(--seal); padding: .08em .35em; border-radius: 3px; overflow-wrap: anywhere; }
+.rule { height: 1px; background: var(--hair); border: 0; margin: 0; }
+footer { color: var(--muted); font-size: .82rem; border-top: 1px solid var(--hair); padding-top: 1.2rem; }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="brand">
+      <svg class="logo" viewBox="0 0 32 32" role="img" aria-label="kRep">
+        <g fill="none" stroke="currentColor" stroke-linejoin="round">
+          <path d="M16 2.6 27.6 9.3 27.6 22.7 16 29.4 4.4 22.7 4.4 9.3Z" stroke-width="2.1" opacity=".45"/>
+          <g stroke-linecap="round" stroke-width="3.1">
+            <path d="M10.2 19.2 13.6 14.7"/>
+            <path d="M13.9 22.2 19.7 14.5"/>
+            <path d="M17.6 25.1 24.6 15.8"/>
+          </g>
+        </g>
+      </svg>
+      <span class="wordmark">kRep</span>
+    </div>
+    <h1>A track record you own, that a stranger can check.</h1>
+    <p class="thesis">Reputation is the last asset in commerce still held hostage. kRep makes it something you carry, backed by settled payments on a public chain, verifiable by anyone without asking a platform&rsquo;s permission &mdash; or its opinion.</p>
+  </header>
+
+  <hr class="rule">
+
+  <section>
+    <p class="q">Why</p>
+    <h2>Every existing answer asks you to trust somebody.</h2>
+    <p class="dim">You are about to send money to someone you have never met. The question &mdash; will they deliver? &mdash; is the oldest one in trade, and every current answer has the same shape: take our word for it.</p>
+    <dl class="rows">
+      <div>
+        <dt>Reviews</dt>
+        <dd>Free to write, so free to fake. Fifty glowing accounts cost an afternoon. The signal is worth what it costs to forge, which is nothing.</dd>
+      </div>
+      <div>
+        <dt>Platform ratings</dt>
+        <dd>Genuinely expensive to fake &mdash; and owned by the platform. Leave and you start at zero, so the rating is a leash as much as an asset. You are also trusting the platform&rsquo;s account of its own sellers, which is precisely where its incentives are worst.</dd>
+      </div>
+      <div class="mine">
+        <dt>A kRep record</dt>
+        <dd>Every entry had to be paid for with a settled transaction on a public chain, and the failures are written by the escrow rather than by the person being judged. Forging a history means buying it, deal by deal, across the months it claims to span. Nobody issues it, nobody can revoke it, and checking it requires asking no one.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section>
+    <p class="q">What</p>
+    <h2>An append-only chain of co-signed trades, anchored in real settlements.</h2>
+    <p class="dim">Each entry records one trade: who the counterparty was, which side you were on, roughly how large, and how it ended. Both parties sign it. Its identifier is then committed inside the payload of the Kaspa transaction that actually settled the deal &mdash; so the entry cannot exist unless the money moved.</p>
+    <p class="dim">Entries are hash-linked, so removing an inconvenient one from the middle breaks the chain visibly. Truncating it does not, which is why the second half of the design exists: a public accumulator of every default, rebuilt from chain data by whoever is reading, so a defaulter cannot become clean by handing over a shorter file.</p>
+    <ol class="steps">
+      <li><b>A job is agreed.</b> <span>An escrow holds the buyer&rsquo;s payment and the maker&rsquo;s bond, in a native Kaspa covenant &mdash; no custodian.</span></li>
+      <li><b>The work happens.</b> <span>Or does not. The covenant only knows deadlines and signatures.</span></li>
+      <li><b>Settlement mints reputation.</b> <span>One transaction releases the funds and commits both parties&rsquo; attestation ids in its payload.</span></li>
+      <li><b>Or the escrow writes a default.</b> <span>If the maker vanishes, the buyer takes the bond and the covenant records the failure &mdash; with no signature from the defaulter, who would never provide one.</span></li>
+      <li><b>Anyone can check it.</b> <span>A reader rebuilds the anchor set from the chain and verifies the record locally. No server, no API key, no permission.</span></li>
+      <li><b>Or prove it without showing it.</b> <span>A zero-knowledge proof establishes &ldquo;at least N successes, zero defaults&rdquo; while revealing neither the chain nor the pseudonym.</span></li>
+    </ol>
+  </section>
+
+  <section>
+    <p class="q">Who</p>
+    <h2>People trading with strangers, and the sellers tired of starting over.</h2>
+    <p class="dim"><strong>Buyers</strong> who want a claim they can check themselves rather than a badge somebody else awarded. <strong>Sellers</strong> who have built standing on one marketplace and cannot take a single day of it anywhere else. The first vertical is <strong>FabMesh</strong> &mdash; distributed fabrication, where a buyer sends a design file to a stranger with a 3D printer or a CNC mill and has no way to tell a professional from a chancer.</p>
+    <p class="dim">It is deliberately not for everyone. There is no legal identity here, no KYC, no company to complain to, and no way to reverse a settled trade. If a dispute needs a court, this is the wrong instrument. What it offers instead is that nobody &mdash; including its authors &mdash; can alter, revoke, or price your record.</p>
+  </section>
+
+  <section>
+    <p class="q">Where</p>
+    <h2>On Kaspa, on relays you pick, and on your own machine.</h2>
+    <dl class="rows">
+      <div>
+        <dt>Kaspa L1</dt>
+        <dd>Attestations are anchored in settlement transactions; escrows are native covenants. Ten blocks per second and low fees make per-trade anchoring affordable rather than theoretical.</dd>
+      </div>
+      <div>
+        <dt>Nostr</dt>
+        <dd>Listings and job postings travel over relays anyone can run and any reader can choose. Discovery has no operator.</dd>
+      </div>
+      <div>
+        <dt>Your machine</dt>
+        <dd>The explorer and the marketplace are local clients. A hosted version would be a server of record &mdash; you would be trusting its operator about what is anchored, which is the exact trust being removed. So verification runs where you are, against a node you point at.</dd>
+      </div>
+    </dl>
+  </section>
+
+  <section>
+    <p class="q">When</p>
+    <h2>Now, because the covenants only just arrived.</h2>
+    <p class="dim">The load-bearing piece is the unilateral default: a record of failure that the failing party never signs. That needs a covenant enforcing state transitions on-chain, and on Kaspa those became available with the <strong>Toccata</strong> hardfork (KIP-16/17/20/21), live on mainnet since DAA 474,165,565. Before it, a maker who took the money and vanished simply left no trace &mdash; the one entry a reputation system most needs is the one nobody volunteers.</p>
+    <p class="dim">Seven milestones are built and running: the attestation chain, the escrow covenant, the job board, an end-to-end dogfood trade, the explorer, zero-knowledge selective disclosure, and the marketplace.</p>
+    <div class="facts">
+      <div class="fact"><span class="n">13,264</span><span class="l">lines of Rust, plus 290 of Noir</span></div>
+      <div class="fact"><span class="n">178</span><span class="l">tests, run against live chain data</span></div>
+      <div class="fact"><span class="n">169,900</span><span class="l">sompi &mdash; fee for the mainnet settlement that minted two reputations</span></div>
+      <div class="fact"><span class="n">14,656</span><span class="l">bytes &mdash; a proof of &ldquo;N successes, no defaults&rdquo;, made and checked in ~55s each</span></div>
+      <div class="fact"><span class="n">275,776</span><span class="l">anchored ids in a full pruning window, rebuilt from chain data alone</span></div>
+      <div class="fact"><span class="n">1.7s</span><span class="l">to bring that accumulator current after the one-off build</span></div>
+    </div>
+  </section>
+
+  <hr class="rule">
+
+  <section>
+    <div class="well">
+      <h3>What is proven, and what is not</h3>
+      <p class="dim">A reputation system asking to be believed should be specific about its own evidence. This is the honest ledger.</p>
+      <div class="ledger">
+        <div><span class="y">&check;</span><p><b>The loop runs on mainnet.</b> A settlement transaction carrying two attestation ids, <code>330861aa&hellip;</code>, with both chains verifying and one trade scored on each side. The predicted transaction id matched the broadcast one exactly.</p></div>
+        <div><span class="y">&check;</span><p><b>Defaults cannot be hidden.</b> A maker was slashed on testnet, and the same chain with the default entry simply omitted &mdash; which still verifies structurally &mdash; was refused by the accumulator. A defaulter cannot become clean by sending a shorter file.</p></div>
+        <div><span class="y">&check;</span><p><b>The zero-knowledge proof is real.</b> Generated and verified with Barretenberg against roots rebuilt from a full pruning window. A proof built on any other accumulator fails, and so does a proof of a circuit that asserts nothing.</p></div>
+        <div><span class="n">&mdash;</span><p><b>Every trade so far was self-dealt.</b> One person has held both sides of every deal. Counterparty diversity has therefore never been a real signal, and the wash-trading flag has never seen a genuine circle. This is the single most important gap, and it needs one other person rather than more code.</p></div>
+        <div><span class="n">&mdash;</span><p><b>Escrow has run only on testnet.</b> Mainnet has carried the attestation and anchoring loop, not the covenant.</p></div>
+        <div><span class="n">&mdash;</span><p><b>Records age out of an ordinary node&rsquo;s view.</b> Kaspa prunes, so an old record becomes unreadable without becoming untrue. Anyone relying on long histories needs an archival node. The software says &ldquo;cannot confirm&rdquo; rather than guessing.</p></div>
+        <div><span class="n">&mdash;</span><p><b>The marketplace has three listings, all mine.</b> The mechanism works; the market does not exist yet.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    kRep &mdash; pseudonymous reputation anchored on Kaspa. No identity, no issuer, no server of record.
+    Figures are measurements from live runs, not projections.
+  </footer>
+</div>

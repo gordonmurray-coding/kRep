@@ -234,7 +234,7 @@ section { display: flex; flex-direction: column; gap: .75rem; }
       <button class="ghost sample" data-sample="verified">Someone who delivered</button>
       <button class="ghost sample" data-sample="defaulted">Someone who didn&rsquo;t</button>
     </div>
-    <p class="hint fineprint">Checked against your own Kaspa node &mdash; <b id="node">&hellip;</b> &mdash; so no one&rsquo;s word is taken for any of it, this page&rsquo;s included. The two examples are real records from the test network; a node keeps only recent history, so in time they will read as <em>can&rsquo;t see back that far</em>, which is the honest answer rather than a failure.</p>
+    <p class="hint fineprint" id="whose">Checked against your own Kaspa node &mdash; <b id="node">&hellip;</b> &mdash; so no one&rsquo;s word is taken for any of it, this page&rsquo;s included. The two examples are real records from the test network; a node keeps only recent history, so in time they will read as <em>can&rsquo;t see back that far</em>, which is the honest answer rather than a failure.</p>
   </div>
 
   <details class="explain">
@@ -419,7 +419,21 @@ document.querySelectorAll('.sample').forEach(b => b.addEventListener('click', ()
 }));
 $('#go').addEventListener('click', verify);
 $('#clear').addEventListener('click', () => { $('#chain').value = ''; $('#out').classList.add('hidden'); });
-fetch('/api/info').then(r => r.json()).then(r => { $('#node').textContent = r.rpc || 'your node'; }).catch(() => { $('#node').textContent = 'your node'; });
+fetch('/api/info').then(r => r.json()).then(r => {
+  $('#node').textContent = r.rpc || 'your node';
+  // On a hosted instance the promise this page makes is somebody else's to
+  // keep. Saying otherwise would be the exact failure it criticises platforms
+  // for, so the sentence changes rather than the reader being left to assume.
+  if (r.public) {
+    $('#whose').innerHTML = 'Checked against a node run by whoever operates this site &mdash; '
+      + 'not by you. That is a real difference: you are trusting them, which is the one thing '
+      + 'this tool exists to avoid. For a verdict nobody can influence, run it yourself: '
+      + '<code style="font-family:var(--mono);font-size:.9em">krep serve --rpc grpc://your-node:16110</code>. '
+      + 'The two examples are real records from Kaspa\u2019s test network; a node keeps only recent '
+      + 'history, so in time they will read as <em>can\u2019t see back that far</em>, which is the '
+      + 'honest answer rather than a failure.';
+  }
+}).catch(() => { $('#node').textContent = 'your node'; });
 </script>
 </body>
 </html>

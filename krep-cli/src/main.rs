@@ -335,6 +335,17 @@ enum Cmd {
         /// would take an hour for a page of twenty.
         #[arg(long)]
         roots: Option<PathBuf>,
+        /// Serving people other than yourself — behind a tunnel, a reverse
+        /// proxy, or a public address.
+        ///
+        /// Both pages otherwise tell the reader the checking happened on their
+        /// machine against their node, which for a visitor is untrue. This
+        /// swaps that copy for what is actually the case, and points them at
+        /// running it themselves. It changes no verification: a hosted verdict
+        /// is a claim by whoever hosts it, and saying so is the only honest
+        /// way to offer one.
+        #[arg(long)]
+        public: bool,
         #[command(flatten)]
         relay: RelayOpts,
         #[command(flatten)]
@@ -1647,13 +1658,20 @@ fn main() -> Result<()> {
                 println!("{}:{}\t{} sompi", outpoint.transaction_id, outpoint.index, entry.amount);
             }
         }
-        Cmd::Serve { listen, roots: roots_path, relay, rpc: opts } => {
+        Cmd::Serve { listen, roots: roots_path, public, relay, rpc: opts } => {
             if opts.offline {
                 bail!("the explorer verifies anchoring; --offline would make it a viewer of unproven claims");
             }
             let url = rpc::endpoint(&opts.rpc).ok_or_else(|| {
                 anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
             })?;
+            if !public && !listen.starts_with("127.") && !listen.starts_with("localhost") {
+                eprintln!(
+                    "!! {listen} is reachable by other people, but --public is not set, so both\n\
+                     !! pages will tell them the checking happened on their own machine. It did\n\
+                     !! not. Pass --public if that is deliberate."
+                );
+            }
             let session = open_rpc(&url)?;
             let scan_from = opts
                 .scan_from
@@ -1684,6 +1702,7 @@ fn main() -> Result<()> {
                     None => None,
                 },
                 relays: board::relays(&relay.relays).unwrap_or_default(),
+                public,
             }
             .serve(&listen)?;
         }

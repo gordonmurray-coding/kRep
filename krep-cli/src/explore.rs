@@ -34,6 +34,15 @@ pub struct Explorer {
     /// showing scores it has not checked.
     pub roots: Option<Arc<crate::market::RootsVerifier>>,
     pub relays: Vec<String>,
+    /// Whether this instance is serving strangers.
+    ///
+    /// Both pages tell the reader that verification happened on their own
+    /// machine against their own node. On a hosted deployment that sentence is
+    /// simply false, and it is the exact claim this project exists to make
+    /// true — so the copy has to change rather than quietly mislead. A hosted
+    /// explorer is a server of record; it can still be useful, but only if it
+    /// says which one it is.
+    pub public: bool,
 }
 
 impl Explorer {
@@ -195,6 +204,7 @@ impl Explorer {
                 serde_json::json!({
                     "rpc": self.rpc_url,
                     "market": self.roots.is_some() && !self.relays.is_empty(),
+                    "public": self.public,
                 })
                 .to_string(),
             ),
