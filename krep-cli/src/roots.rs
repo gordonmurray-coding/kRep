@@ -20,6 +20,25 @@ use std::sync::Arc;
 /// Selector of the escrow covenant's slash branch.
 pub const SLASH_SELECTOR: i64 = 7;
 
+/// What an earlier scan left behind, so a later one can carry on from it.
+///
+/// The escrows are not an optimisation. A slash resolves against the payload of
+/// the escrow it spends, and that escrow was very often created in an earlier
+/// window — so a scan that resumes without them cannot recognise the slash, and
+/// the defaulter silently drops out of the accumulator on the next update. A
+/// reputation system that forgets defaults when you refresh it is worse than one
+/// that never had them.
+///
+/// Only escrow-shaped payloads are kept, which is what bounds the size: they
+/// carry a four-byte magic, and nothing else in a payload can be spent by a
+/// slash.
+#[derive(Default)]
+pub struct Prior {
+    pub leaves: Vec<Vec<u8>>,
+    pub defaulted: Vec<[u8; 32]>,
+    pub escrows: HashMap<RpcHash, Vec<u8>>,
+}
+
 pub struct Roots {
     pub anchored: MerkleTree,
     pub defaults: SparseMerkleTree,
@@ -29,6 +48,10 @@ pub struct Roots {
     pub leaves: Vec<Vec<u8>>,
     /// The pseudonyms behind `defaults`, kept for the same reason.
     pub defaulted: Vec<[u8; 32]>,
+    /// Escrow payloads seen so far, carried into the next update.
+    pub escrows: HashMap<RpcHash, Vec<u8>>,
+    /// The chain block this scan ended on — where a later one resumes.
+    pub end: RpcHash,
     pub blocks_scanned: usize,
     pub accepted_txs: usize,
     pub reached_tip: bool,
@@ -79,6 +102,7 @@ pub async fn build(
     start: RpcHash,
     max_batches: usize,
     depth: usize,
+    prior: Prior,
 ) -> Result<Roots> {
     // Pass one: which transactions were accepted, and how far the window runs.
     let mut accepted: HashSet<RpcHash> = HashSet::new();
@@ -102,10 +126,12 @@ pub async fn build(
     }
     let end = cursor;
 
-    // Pass two: bodies in bulk, keeping only what was accepted.
-    let mut leaves: Vec<Vec<u8>> = Vec::new();
-    let mut defaulted: Vec<[u8; 32]> = Vec::new();
-    let mut payloads: HashMap<RpcHash, Vec<u8>> = HashMap::new();
+    // Pass two: bodies in bulk, keeping only what was accepted. Seeded with
+    // whatever an earlier scan established, so an update extends the set rather
+    // than replacing it.
+    let mut leaves: Vec<Vec<u8>> = prior.leaves;
+    let mut defaulted: Vec<[u8; 32]> = prior.defaulted;
+    let mut payloads: HashMap<RpcHash, Vec<u8>> = prior.escrows;
     let mut pending_slashes: Vec<(RpcHash, Vec<u8>)> = Vec::new();
     let mut blocks_scanned = 0usize;
     let mut accepted_txs = 0usize;
@@ -192,11 +218,25 @@ pub async fn build(
         }
     }
 
+    // Keep only escrow-shaped payloads. Everything else was needed for this
+    // scan and would be dead weight in the file.
+    let escrows: HashMap<RpcHash, Vec<u8>> = payloads
+        .into_iter()
+        .filter(|(_, p)| p.len() >= 4 && p[..4] == krep_escrow::state::MAGIC)
+        .collect();
+
+    leaves.sort_unstable();
+    leaves.dedup();
+    defaulted.sort_unstable();
+    defaulted.dedup();
+
     Ok(Roots {
         anchored: MerkleTree::build_fixed_depth(leaves.clone(), depth),
         defaults: SparseMerkleTree::from_keys(defaulted.clone()),
         leaves,
         defaulted,
+        escrows,
+        end,
         blocks_scanned,
         accepted_txs,
         reached_tip,

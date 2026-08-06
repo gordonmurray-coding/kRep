@@ -566,15 +566,46 @@ the page says it cannot confirm rather than calling a stranger a liar because a
 file is out of date. The cost is that an invented record also reads as unknown;
 that is the right way round, since no score is ever shown for one.
 
-### What a partial accumulator cannot do
+### Keeping an accumulator current
 
-Worth stating because it is not obvious and it bit this build immediately.
 `verify_anchored` checks *every* entry, so an accumulator verifies only chains
-that lie entirely inside it. A trader whose history straddles the scan's start
-fails wholesale — not partially. A marketplace therefore wants a full-window
-scan, which takes about nine hours, and which is stale for anything that settled
-since. Keeping one current needs incremental following of the tip; that does not
-exist yet, and it is the honest gap in this milestone.
+lying entirely inside it. A trader whose history straddles the scan's start fails
+wholesale, not partially. A marketplace therefore wants a full-window scan — nine
+hours — and it is stale the moment anything settles after it.
+
+```bash
+krep roots --rpc grpc://node:16110 --out roots.json     # once, hours
+krep roots --rpc grpc://node:16110 --update roots.json  # thereafter, seconds
+```
+
+An update resumes at the chain block the last scan stopped on and merges what has
+settled since. Measured: **1.7 seconds** to take in 2,351 new blocks, and 0.3
+seconds when nothing has happened. The nine-hour rebuild becomes a one-off.
+
+**The part that is easy to get wrong.** A slash resolves against the payload of
+the escrow it spends, and that escrow is usually *older* than the window the
+slash turns up in. Resume without carrying those payloads forward and the slash
+is unrecognisable — so the defaulter silently drops out of the accumulator on the
+next refresh. A reputation system that forgets defaults when you update it is
+worse than one that never recorded them.
+
+So a saved scan keeps the escrow-shaped payloads it has seen, which is what bounds
+the cost: they carry a four-byte magic, and nothing else in a payload can be spent
+by a slash. Verified on testnet rather than assumed — an escrow was opened and
+claimed, a scan taken, the maker slashed *after* it, and the update then found the
+default with the escrow that created it outside its window:
+
+```
+resuming from c46a6524…
+  carrying forward 985 leaves, 0 defaulted pseudonyms, 2 escrow payloads
+scanned 3417 blocks, 32461 accepted transactions, reached the tip
+  anchored leaves 1200 | defaulted pseudonyms 1   <- the slash, resolved against a carried payload
+```
+
+A file written before this existed records no stopping point. It still loads; it
+just cannot be resumed, and says so rather than quietly restarting from the wrong
+place. Reorganisation of the block a scan stopped on is the remaining failure
+case, and it reports itself with the instruction to rebuild once.
 
 ## M5 — reputation explorer
 

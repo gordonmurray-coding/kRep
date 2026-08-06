@@ -276,6 +276,11 @@ enum Cmd {
         /// rescanning. A full window costs hours; this makes that a one-off.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Extend an existing scan instead of starting over: resume where it
+        /// stopped and merge whatever has settled since. Writes back to the same
+        /// file unless --out says otherwise.
+        #[arg(long, conflicts_with_all = ["from", "recent"])]
+        update: Option<PathBuf>,
         #[arg(long)]
         rpc: Option<String>,
     },
@@ -1682,21 +1687,60 @@ fn main() -> Result<()> {
             }
             .serve(&listen)?;
         }
-        Cmd::Roots { from, recent, depth, max_batches, expect, out, rpc: rpc_url } => {
+        Cmd::Roots { from, recent, depth, max_batches, expect, out, update, rpc: rpc_url } => {
             let url = rpc::endpoint(&rpc_url).ok_or_else(|| {
                 anyhow!("no kaspad endpoint. Pass --rpc grpc://host:16110 or set {}", rpc::RPC_ENV)
             })?;
             let session = open_rpc(&url)?;
-            let start = match (&from, recent) {
-                (Some(h), _) => RpcHash::from_str(h).map_err(|e| anyhow!("bad --from: {e}"))?,
-                (None, Some(n)) => session.rt.block_on(roots::recent_start(&session.client, n))?,
-                (None, None) => session
+            // Resuming supplies its own start — the point the last scan stopped
+            // at — along with everything that scan established.
+            let resumed = match &update {
+                Some(p) => {
+                    let saved = prove::RootsFile::load(p)?;
+                    let tip = saved.tip.clone().ok_or_else(|| {
+                        anyhow!(
+                            "{} records no stopping point, so there is nothing to resume from. \
+                             Rebuild it once with `krep roots --out`; updates work from then on.",
+                            p.display()
+                        )
+                    })?;
+                    let at = RpcHash::from_str(&tip).map_err(|e| anyhow!("bad saved tip: {e}"))?;
+                    eprintln!(
+                        "resuming from {tip}\n  carrying forward {} leaves, {} defaulted \
+                         pseudonyms, {} escrow payloads",
+                        saved.anchored_leaves.len(),
+                        saved.defaulted.len(),
+                        saved.escrows.len()
+                    );
+                    Some((at, saved.depth, saved.prior()?))
+                }
+                None => None,
+            };
+            // A resumed scan keeps the depth it was built with; a different one
+            // would produce a tree the old leaves no longer belong to.
+            let depth = resumed.as_ref().map(|(_, d, _)| *d).unwrap_or(depth);
+            let start = match (&resumed, &from, recent) {
+                (Some((at, _, _)), _, _) => *at,
+                (None, Some(h), _) => RpcHash::from_str(h).map_err(|e| anyhow!("bad --from: {e}"))?,
+                (None, None, Some(n)) => session.rt.block_on(roots::recent_start(&session.client, n))?,
+                (None, None, None) => session
                     .rt
                     .block_on(session.client.get_block_dag_info())
                     .map_err(|e| anyhow!("get_block_dag_info: {e}"))?
                     .pruning_point_hash,
             };
-            let r = session.rt.block_on(roots::build(&session.client, start, max_batches, depth))?;
+            let carried = resumed.map(|(_, _, p)| p).unwrap_or_default();
+            let r = session
+                .rt
+                .block_on(roots::build(&session.client, start, max_batches, depth, carried))
+                .with_context(|| match &update {
+                    Some(p) => format!(
+                        "resuming {} failed. If the block it stopped at was reorganised out of \
+                         the chain, rebuild once with `krep roots --out`",
+                        p.display()
+                    ),
+                    None => "scanning".into(),
+                })?;
             eprintln!(
                 "scanned {} blocks, {} accepted transactions{}",
                 r.blocks_scanned,
@@ -1721,6 +1765,8 @@ fn main() -> Result<()> {
                     None => eprintln!("  ABSENT: that attestation is not in the rebuilt set"),
                 }
             }
+            // An update writes back to the file it came from unless told otherwise.
+            let out = out.or_else(|| update.clone());
             if let Some(path) = &out {
                 let saved = prove::RootsFile::from_scan(&r, depth);
                 fs::write(path, serde_json::to_string(&saved)?)

@@ -51,6 +51,17 @@ pub const PUBLIC_INPUT_BYTES: usize = 96;
 #[derive(Serialize, Deserialize)]
 pub struct RootsFile {
     pub depth: usize,
+    /// The chain block this scan ended on. `krep roots --update` resumes here,
+    /// which is what makes an accumulator maintainable rather than a nine-hour
+    /// rebuild every time something settles.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tip: Option<String>,
+    /// Escrow payloads seen so far, keyed by transaction id. Carried forward
+    /// because a slash resolves against the escrow it spends, and that escrow is
+    /// usually older than the window the slash appears in — without these, an
+    /// update would quietly forget defaults.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub escrows: std::collections::BTreeMap<String, String>,
     /// Whether the scan reached the tip. A partial set is not a smaller version
     /// of a complete one — it is one that fails honest provers.
     pub complete: bool,
@@ -72,12 +83,37 @@ impl RootsFile {
         leaves.dedup();
         RootsFile {
             depth,
+            tip: Some(r.end.to_string()),
+            escrows: r
+                .escrows
+                .iter()
+                .map(|(k, v)| (k.to_string(), hex::encode(v)))
+                .collect(),
             complete: r.reached_tip,
             anchored_root: r.anchored.root().as_ref().map(to_hex).unwrap_or_default(),
             defaults_root: to_hex(&r.defaults.root()),
             anchored_leaves: leaves,
             defaulted: r.defaulted.iter().map(hex::encode).collect(),
         }
+    }
+
+    /// Everything a resumed scan needs to carry forward.
+    pub fn prior(&self) -> Result<crate::roots::Prior> {
+        let mut leaves = Vec::with_capacity(self.anchored_leaves.len());
+        for h in &self.anchored_leaves {
+            leaves.push(hex::decode(h).map_err(|e| anyhow!("bad leaf hex: {e}"))?);
+        }
+        let mut defaulted = Vec::with_capacity(self.defaulted.len());
+        for h in &self.defaulted {
+            let b = hex::decode(h).map_err(|e| anyhow!("bad pseudonym hex: {e}"))?;
+            defaulted.push(<[u8; 32]>::try_from(&b[..]).map_err(|_| anyhow!("pseudonym must be 32 bytes"))?);
+        }
+        let mut escrows = std::collections::HashMap::with_capacity(self.escrows.len());
+        for (txid, payload) in &self.escrows {
+            let id = txid.parse().map_err(|e| anyhow!("bad escrow txid {txid}: {e}"))?;
+            escrows.insert(id, hex::decode(payload).map_err(|e| anyhow!("bad escrow payload: {e}"))?);
+        }
+        Ok(crate::roots::Prior { leaves, defaulted, escrows })
     }
 
     pub fn load(path: &Path) -> Result<Self> {
@@ -550,6 +586,8 @@ mod tests {
         let (anchored, defaults) = accumulators(&chain, vec![[9u8; 32]]);
         let file = RootsFile {
             depth: ANCHOR_DEPTH,
+            tip: None,
+            escrows: Default::default(),
             complete: true,
             anchored_root: to_hex(&anchored.root().unwrap()),
             defaults_root: to_hex(&defaults.root()),
@@ -575,6 +613,8 @@ mod tests {
         let (anchored, defaults) = accumulators(&chain, vec![]);
         let mut file = RootsFile {
             depth: ANCHOR_DEPTH,
+            tip: None,
+            escrows: Default::default(),
             complete: true,
             anchored_root: to_hex(&anchored.root().unwrap()),
             defaults_root: to_hex(&defaults.root()),
@@ -595,6 +635,45 @@ mod tests {
         .unwrap());
         file.defaults_root = to_hex(&SparseMerkleTree::from_keys([[7u8; 32]]).root());
         assert!(file.trees().unwrap_err().to_string().contains("defaults root"));
+    }
+
+    #[test]
+    fn a_saved_scan_carries_what_a_resume_needs() {
+        // The escrow payloads are the point. A slash resolves against the escrow
+        // it spends, and that escrow is usually older than the window the slash
+        // turns up in — drop them and an update quietly forgets defaulters,
+        // which is the one thing this accumulator exists to remember.
+        let file = RootsFile {
+            depth: ANCHOR_DEPTH,
+            tip: Some("f".repeat(64)),
+            escrows: [("a".repeat(64), hex::encode([0x6bu8; 142]))].into_iter().collect(),
+            complete: true,
+            anchored_root: String::new(),
+            defaults_root: String::new(),
+            anchored_leaves: vec![hex::encode(anchor_leaf(&[1u8; 32], 0, &[2u8; 32]))],
+            defaulted: vec![hex::encode([3u8; 32])],
+        };
+        let prior = file.prior().unwrap();
+        assert_eq!(prior.leaves.len(), 1);
+        assert_eq!(prior.defaulted, vec![[3u8; 32]]);
+        assert_eq!(prior.escrows.len(), 1, "escrow payloads must survive a resume");
+        assert_eq!(prior.escrows.values().next().unwrap().len(), 142);
+    }
+
+    #[test]
+    fn a_scan_from_before_resumability_still_loads() {
+        // Old files have no tip and no escrows. They must not fail to parse —
+        // they simply cannot be resumed, and the CLI says so rather than
+        // producing a scan that silently starts from the wrong place.
+        let json = serde_json::json!({
+            "depth": 20, "complete": true,
+            "anchored_root": "0x1", "defaults_root": "0x2",
+            "anchored_leaves": [], "defaulted": []
+        })
+        .to_string();
+        let f: RootsFile = serde_json::from_str(&json).unwrap();
+        assert!(f.tip.is_none());
+        assert!(f.escrows.is_empty());
     }
 
     #[test]
